@@ -1,6 +1,6 @@
 """设备管理页 UI"""
 from PyQt5.QtWidgets import QWidget, QLabel, QVBoxLayout
-from seeed_jetson_flash.core.events import bus
+from seeed_jetson_develop.core.events import bus
 
 
 def build_page() -> QWidget:

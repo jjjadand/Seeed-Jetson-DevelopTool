@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
-from seeed_jetson_flash.core.runner import Runner
+from seeed_jetson_develop.core.runner import Runner
 
 _DATA = Path(__file__).parent / "data" / "skills.json"
 

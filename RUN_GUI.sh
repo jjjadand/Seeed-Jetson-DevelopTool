@@ -26,5 +26,5 @@ seeed-jetson-flash gui
 if [ $? -ne 0 ]; then
     echo ""
     echo "尝试直接运行..."
-    python -m seeed_jetson_flash.gui.main_window
+    python -m seeed_jetson_develop.gui.main_window
 fi

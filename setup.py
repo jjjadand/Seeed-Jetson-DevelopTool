@@ -4,14 +4,14 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
-    name="seeed-jetson-flash",
-    version="0.1.0",
+    name="seeed-jetson-develop",
+    version="0.2.0",
     author="Seeed Studio",
     author_email="support@seeedstudio.com",
-    description="A tool for flashing Jetson devices",
+    description="Seeed Jetson Develop Tool — 烧录、设备管理、应用市场、Skills、远程开发",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/Seeed-Studio/seeed-jetson-flash",
+    url="https://github.com/Seeed-Studio/seeed-jetson-develop",
     packages=find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",
@@ -28,10 +28,10 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "seeed-jetson-flash=seeed_jetson_flash.cli:main",
+            "seeed-jetson-develop=seeed_jetson_develop.cli:main",
         ],
     },
     package_data={
-        "seeed_jetson_flash": ["data/*.json", "assets/images/*"],
+        "seeed_jetson_develop": ["data/*.json", "assets/images/*"],
     },
 )

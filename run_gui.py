@@ -12,7 +12,7 @@ sys.path.insert(0, project_dir)
 
 # 清除缓存
 for key in list(sys.modules.keys()):
-    if 'seeed_jetson_flash' in key:
+    if 'seeed_jetson_develop' in key:
         del sys.modules[key]
 
 def main():
@@ -23,26 +23,26 @@ def main():
         import importlib.util
         spec = importlib.util.spec_from_file_location(
             "main_window", 
-            os.path.join(project_dir, "seeed_jetson_flash", "gui", "main_window.py")
+            os.path.join(project_dir, "seeed_jetson_develop", "gui", "main_window.py")
         )
         main_window = importlib.util.module_from_spec(spec)
         
         # 先加载 styles
         styles_spec = importlib.util.spec_from_file_location(
             "styles",
-            os.path.join(project_dir, "seeed_jetson_flash", "gui", "styles.py")
+            os.path.join(project_dir, "seeed_jetson_develop", "gui", "styles.py")
         )
         styles = importlib.util.module_from_spec(styles_spec)
-        sys.modules['seeed_jetson_flash.gui.styles'] = styles
+        sys.modules['seeed_jetson_develop.gui.styles'] = styles
         styles_spec.loader.exec_module(styles)
         
         # 加载 flash 模块
         flash_spec = importlib.util.spec_from_file_location(
             "flash",
-            os.path.join(project_dir, "seeed_jetson_flash", "flash.py")
+            os.path.join(project_dir, "seeed_jetson_develop", "flash.py")
         )
         flash = importlib.util.module_from_spec(flash_spec)
-        sys.modules['seeed_jetson_flash.flash'] = flash
+        sys.modules['seeed_jetson_develop.flash'] = flash
         flash_spec.loader.exec_module(flash)
         
         spec.loader.exec_module(main_window)

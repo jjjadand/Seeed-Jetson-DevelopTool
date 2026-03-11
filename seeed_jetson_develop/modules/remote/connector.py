@@ -1,6 +1,6 @@
 """远程连接管理 — SSH 连通性检测"""
 import socket
-from seeed_jetson_flash.core.device import DeviceInfo
+from seeed_jetson_develop.core.device import DeviceInfo
 
 
 def check_ssh(host: str, port: int = 22, timeout: int = 5) -> bool:

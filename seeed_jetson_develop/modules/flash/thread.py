@@ -1,6 +1,6 @@
 """刷写后台线程"""
 from PyQt5.QtCore import QThread, pyqtSignal
-from seeed_jetson_flash.flash import JetsonFlasher
+from seeed_jetson_develop.flash import JetsonFlasher
 
 
 class FlashThread(QThread):

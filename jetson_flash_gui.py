@@ -60,7 +60,7 @@ QGroupBox {
 """
 
 # 数据路径
-DATA_DIR = Path(__file__).parent / "seeed_jetson_flash" / "data"
+DATA_DIR = Path(__file__).parent / "seeed_jetson_develop" / "data"
 
 
 class MainWindow(QMainWindow):

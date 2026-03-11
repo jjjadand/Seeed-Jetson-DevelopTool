@@ -143,8 +143,8 @@ GUI 特性：
 ## 项目结构
 
 ```
-seeed-jetson-flash/
-├── seeed_jetson_flash/
+seeed-jetson-develop/
+├── seeed_jetson_develop/
 │   ├── __init__.py          # 包初始化
 │   ├── cli.py               # 命令行接口
 │   ├── flash.py             # 固件刷写模块

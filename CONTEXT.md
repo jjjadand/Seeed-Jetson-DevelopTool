@@ -13,7 +13,7 @@ PRD 核心定位：
 ## 代码结构
 
 ```
-seeed_jetson_flash/
+seeed_jetson_develop/
 │
 ├── core/                        # 共享基础层，所有模块依赖，不依赖任何模块
 │   ├── __init__.py              # 导出 bus / Runner / DeviceInfo
@@ -95,7 +95,7 @@ prd_images/     # 从 PRD docx 提取的参考截图
 模块之间**不直接 import**，全部通过 `core/events.py` 的全局单例 `bus` 通信：
 
 ```python
-from seeed_jetson_flash.core import bus
+from seeed_jetson_develop.core import bus
 
 # 发出事件（任意模块）
 bus.skill_run_requested.emit("usb_wifi")
@@ -119,8 +119,8 @@ bus.skill_completed.connect(my_callback)
 
 ```python
 # 主窗口组装示例
-from seeed_jetson_flash.modules.flash import build_page as flash_page
-from seeed_jetson_flash.modules.devices import build_page as devices_page
+from seeed_jetson_develop.modules.flash import build_page as flash_page
+from seeed_jetson_develop.modules.devices import build_page as devices_page
 
 stack.addWidget(flash_page(products, product_images))
 stack.addWidget(devices_page())

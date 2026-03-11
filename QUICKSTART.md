@@ -61,7 +61,7 @@ seeed-jetson-flash flash -p j4012mini -l 36.3.0
 
 3. **直接运行**:
    ```bash
-   python -m seeed_jetson_flash.gui.main_window
+   python -m seeed_jetson_develop.gui.main_window
    ```
 
 4. **使用启动脚本**:

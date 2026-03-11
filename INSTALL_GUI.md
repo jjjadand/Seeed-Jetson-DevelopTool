@@ -24,7 +24,7 @@ seeed-jetson-flash gui
 ### 方法 2: 直接运行 Python 模块
 
 ```bash
-python -m seeed_jetson_flash.gui.main_window
+python -m seeed_jetson_develop.gui.main_window
 ```
 
 ### 方法 3: 使用测试脚本

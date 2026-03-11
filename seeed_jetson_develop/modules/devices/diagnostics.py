@@ -1,7 +1,7 @@
 """诊断项定义 — 每项包含名称、检测命令、结果解析"""
 from dataclasses import dataclass
 from typing import Callable, Optional
-from seeed_jetson_flash.core.runner import Runner
+from seeed_jetson_develop.core.runner import Runner
 
 
 @dataclass

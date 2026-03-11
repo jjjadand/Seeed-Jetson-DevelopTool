@@ -24,5 +24,5 @@ class EventBus(QObject):
     navigate_to         = pyqtSignal(int)    # page index
 
 
-# 全局单例，所有模块 from seeed_jetson_flash.core import bus
+# 全局单例，所有模块 from seeed_jetson_develop.core import bus
 bus = EventBus()

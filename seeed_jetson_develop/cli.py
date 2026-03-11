@@ -98,7 +98,7 @@ def gui():
         if str(module_path) not in sys.path:
             sys.path.insert(0, str(module_path))
         
-        from seeed_jetson_flash.gui.main_window import main as gui_main
+        from seeed_jetson_develop.gui.main_window import main as gui_main
         gui_main()
     except ImportError as e:
         click.echo(f"错误: 无法启动 GUI，请安装 PyQt5: pip install PyQt5", err=True)

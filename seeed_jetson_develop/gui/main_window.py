@@ -455,7 +455,7 @@ def main():
 
 # 兼容旧入口：统一切换到现代版主窗口实现
 try:
-    from seeed_jetson_flash.gui.main_window_sdk import (
+    from seeed_jetson_develop.gui.main_window_sdk import (
         FlashThread as _ModernFlashThread,
         MainWindow as _ModernMainWindow,
         main as _modern_main,

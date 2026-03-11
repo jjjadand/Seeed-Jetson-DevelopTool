@@ -5,7 +5,7 @@ import traceback
 
 try:
     print("Testing import...")
-    from seeed_jetson_flash.gui.main_window import MainWindow
+    from seeed_jetson_develop.gui.main_window import MainWindow
     print("✓ MainWindow imported successfully")
     print(f"MainWindow class: {MainWindow}")
 except Exception as e:

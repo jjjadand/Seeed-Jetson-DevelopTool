@@ -108,8 +108,8 @@
 ## 项目结构
 
 ```
-seeed-jetson-flash/
-├── seeed_jetson_flash/          # 主包
+seeed-jetson-develop/
+├── seeed_jetson_develop/          # 主包
 │   ├── __init__.py              # 包初始化
 │   ├── cli.py                   # CLI 接口 (87 行)
 │   ├── flash.py                 # 刷写模块 (150 行)
