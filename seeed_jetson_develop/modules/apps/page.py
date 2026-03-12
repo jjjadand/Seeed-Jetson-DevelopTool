@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QDialog, QTextEdit, QMessageBox,
 )
 
-from seeed_jetson_develop.core.runner import Runner, get_runner
+from seeed_jetson_develop.core.runner import Runner, SSHRunner, get_runner
 from seeed_jetson_develop.core.events import bus
 from seeed_jetson_develop.modules.apps.registry import load_apps
 from seeed_jetson_develop.gui.theme import (
@@ -32,6 +32,9 @@ class _StatusCheckThread(QThread):
     def run(self):
         runner = get_runner()
         results = {}
+        if not isinstance(runner, SSHRunner):
+            self.all_done.emit(results)
+            return
         for app in self._apps:
             cmd = app.get("check_cmd")
             if cmd:
@@ -594,6 +597,14 @@ def build_page() -> QWidget:
     def _start_check():
         if _check_thread[0] and _check_thread[0].isRunning():
             return
+        if not isinstance(get_runner(), SSHRunner):
+            # 未连接设备，无法检测，所有状态重置为 available
+            for a in apps_data:
+                _statuses[a["id"]] = "available"
+            refresh_btn.setEnabled(True)
+            refresh_btn.setText("↻  刷新状态")
+            _rebuild_grid()
+            return
         for a in apps_data:
             if a.get("check_cmd"):
                 _statuses[a["id"]] = "checking"
@@ -613,6 +624,7 @@ def build_page() -> QWidget:
         _rebuild_grid()
 
     refresh_btn.clicked.connect(_start_check)
+    bus.device_connected.connect(lambda _: _start_check())
 
     # ── 初始化 ──
     _rebuild_grid()
