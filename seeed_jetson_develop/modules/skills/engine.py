@@ -124,17 +124,28 @@ def run_skill(
     runner: Runner,
     on_log: Callable[[str], None],
     params: Optional[dict] = None,
+    max_retries: int = 1,
 ) -> tuple[bool, str]:
+    """执行 skill 的所有命令。失败时最多重试 max_retries 次。"""
     merged = {**skill.params, **(params or {})}
     for cmd_tpl in skill.commands:
         try:
             cmd = cmd_tpl.format(**merged)
         except KeyError:
             cmd = cmd_tpl
-        on_log(f"$ {cmd}")
-        rc, _ = runner.run(cmd, timeout=300, on_output=on_log)
-        if rc != 0:
-            return False, f"命令失败 (rc={rc})"
+
+        last_rc = 0
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                on_log(f"  重试 ({attempt}/{max_retries})…")
+            on_log(f"$ {cmd}")
+            last_rc, _ = runner.run(cmd, timeout=300, on_output=on_log)
+            if last_rc == 0:
+                break
+
+        if last_rc != 0:
+            return False, f"命令失败 (rc={last_rc}): {cmd[:80]}"
+
     return True, f"{skill.name} 执行完成"
 
 

@@ -24,16 +24,20 @@ from seeed_jetson_develop.gui.theme import (
 
 # ── 局域网扫描线程 ────────────────────────────────────────────────────────────
 class _ScanThread(QThread):
-    found  = pyqtSignal(list)
-    status = pyqtSignal(str)
+    found    = pyqtSignal(list)
+    status   = pyqtSignal(str)
+    progress = pyqtSignal(int, int)   # scanned, total
 
-    def __init__(self, subnet: str = "192.168.1"):
+    def __init__(self, subnet: str | None = None):
         super().__init__()
         self._subnet = subnet
 
     def run(self):
-        self.status.emit("正在扫描局域网，请稍候…")
-        hosts = connector.scan_local_network(self._subnet)
+        self.status.emit("正在扫描局域网…")
+        hosts = connector.scan_local_network(
+            self._subnet,
+            on_progress=lambda s, t: self.progress.emit(s, t),
+        )
         self.found.emit(hosts)
 
 
@@ -424,7 +428,7 @@ def build_page() -> QWidget:
     _ip_input.setFixedHeight(_pt(44))
     ip_row.addWidget(_ip_input, 1)
     ssh_test_btn = _btn("连接", primary=True, small=True)
-    scan_btn     = _btn("🔍 扫描局域网", small=True)
+    scan_btn     = _btn("扫描局域网", small=True)
     ip_row.addWidget(ssh_test_btn)
     ip_row.addWidget(scan_btn)
     conn_lay.addLayout(ip_row)
@@ -501,18 +505,22 @@ def build_page() -> QWidget:
     def _do_scan():
         if _scan_thread[0] and _scan_thread[0].isRunning():
             return
-        subnet = _subnet_input.text().strip() or "192.168.1"
+        raw = _subnet_input.text().strip()
+        subnet = raw if raw else None   # None → 自动检测本机子网
         scan_btn.setEnabled(False)
         scan_btn.setText("扫描中…")
-        _scan_result_lbl.setText("正在扫描局域网，请稍候…")
+        _scan_result_lbl.setText("正在扫描局域网…")
         t = _ScanThread(subnet)
         t.found.connect(_on_scan_done)
+        t.progress.connect(lambda s, total: _scan_result_lbl.setText(
+            f"扫描中… {s}/{total}"
+        ))
         t.start()
         _scan_thread[0] = t
 
     def _on_scan_done(hosts: list):
         scan_btn.setEnabled(True)
-        scan_btn.setText("🔍 扫描局域网")
+        scan_btn.setText("扫描局域网")
         if hosts:
             _scan_result_lbl.setText("发现设备：" + "  |  ".join(hosts))
             _ip_input.setText(hosts[0])

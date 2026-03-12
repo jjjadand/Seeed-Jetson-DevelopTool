@@ -6,7 +6,7 @@ from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton, QLineEdit,
     QVBoxLayout, QHBoxLayout, QScrollArea,
-    QDialog, QTextEdit, QMessageBox, QSizePolicy,
+    QDialog, QTextEdit, QMessageBox, QSizePolicy, QSpinBox,
 )
 
 from seeed_jetson_develop.core.runner import Runner, get_runner
@@ -28,10 +28,11 @@ class _RunThread(QThread):
     log    = pyqtSignal(str)
     done   = pyqtSignal(bool, str)
 
-    def __init__(self, skill: Skill):
+    def __init__(self, skill: Skill, max_retries: int = 1):
         super().__init__()
-        self._skill  = skill
-        self._cancel = False
+        self._skill       = skill
+        self._max_retries = max_retries
+        self._cancel      = False
 
     def cancel(self):
         self._cancel = True
@@ -41,6 +42,7 @@ class _RunThread(QThread):
         success, msg = run_skill(
             self._skill, runner,
             on_log=lambda l: self.log.emit(l),
+            max_retries=self._max_retries,
         )
         if not self._cancel:
             self.done.emit(success, msg)
@@ -100,7 +102,7 @@ class _RunDialog(QDialog):
         self._skill  = skill
         self._thread = None
 
-        self.setWindowTitle(f"▶  运行  {skill.name}")
+        self.setWindowTitle(f"运行  {skill.name}")
         self.setMinimumSize(680, 560)
         self.setStyleSheet(f"background:{C_BG}; color:{C_TEXT}; border:none;")
 
@@ -172,13 +174,37 @@ class _RunDialog(QDialog):
         # 按钮行
         btn_row = QHBoxLayout()
         btn_row.setSpacing(12)
-        self._run_btn  = _btn("▶  开始运行", primary=True)
-        self._stop_btn = _btn("■  停止", danger=True)
+        self._run_btn  = _btn("开始运行", primary=True)
+        self._stop_btn = _btn("停止", danger=True)
         self._stop_btn.setEnabled(False)
         close_btn = _btn("关闭")
+
+        # 失败重试次数
+        retry_lbl = QLabel("失败重试")
+        retry_lbl.setStyleSheet(f"color:{C_TEXT3}; font-size:{_pt(11)}pt; background:transparent;")
+        self._retry_spin = QSpinBox()
+        self._retry_spin.setRange(0, 3)
+        self._retry_spin.setValue(1)
+        self._retry_spin.setFixedWidth(_pt(56))
+        self._retry_spin.setFixedHeight(_pt(32))
+        self._retry_spin.setStyleSheet(f"""
+            QSpinBox {{
+                background:{C_CARD_LIGHT};
+                border:none;
+                border-radius:6px;
+                padding:2px 8px;
+                color:{C_TEXT};
+                font-size:{_pt(11)}pt;
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{ width:16px; }}
+        """)
+
         btn_row.addWidget(self._run_btn)
         btn_row.addWidget(self._stop_btn)
         btn_row.addStretch()
+        btn_row.addWidget(retry_lbl)
+        btn_row.addWidget(self._retry_spin)
+        btn_row.addSpacing(8)
         btn_row.addWidget(close_btn)
         lay.addLayout(btn_row)
 
@@ -199,7 +225,7 @@ class _RunDialog(QDialog):
         self._log_edit.clear()
         self._run_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
-        t = _RunThread(self._skill)
+        t = _RunThread(self._skill, max_retries=self._retry_spin.value())
         t.log.connect(self._append)
         t.done.connect(self._on_done)
         t.start()
