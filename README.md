@@ -1,7 +1,7 @@
 <<<<<<< HEAD
-# Seeed Jetson Flash
+# Seeed Jetson Develop
 
-一个用于为多款 Seeed Studio Jetson 设备刷机的 Python 命令行工具。
+一个用于为多款 Seeed Studio Jetson 开发的工具。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python Version](https://img.shields.io/badge/python-3.6+-blue.svg)](https://www.python.org/downloads/)
