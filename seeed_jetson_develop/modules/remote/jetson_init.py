@@ -1,47 +1,30 @@
-"""Jetson 初始化对话框与串口检测辅助。"""
+"""Jetson 初始化对话框与串口检测辅助。跨平台实现（pyserial）。"""
 from __future__ import annotations
 
-import glob
-import os
 import re
-import select
 import shlex
 import shutil
 import subprocess
-import termios
+import sys
 import time
-import tty
 from pathlib import Path
+
+import serial
+import serial.tools.list_ports
 
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
-    QComboBox,
-    QDialog,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMessageBox,
-    QSizePolicy,
-    QTextEdit,
-    QVBoxLayout,
+    QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QSizePolicy, QTextEdit, QVBoxLayout,
 )
 
 from seeed_jetson_develop.gui.theme import (
-    C_BG,
-    C_CARD_LIGHT,
-    C_GREEN,
-    C_ORANGE,
-    C_RED,
-    C_TEXT,
-    C_TEXT2,
-    C_TEXT3,
-    apply_shadow,
-    make_button,
-    make_card,
-    make_label,
-    pt,
+    C_BG, C_CARD_LIGHT, C_GREEN, C_ORANGE, C_RED,
+    C_TEXT, C_TEXT2, C_TEXT3,
+    apply_shadow, make_button, make_card, make_label, pt,
 )
 
+# ── 常量 ──────────────────────────────────────────────────────────────────────
 
 INIT_PENDING_KEYWORDS = (
     "System Configuration",
@@ -56,9 +39,12 @@ INIT_DONE_PATTERNS = (
     r"[A-Za-z0-9._-]+@[\w.-]+:",
 )
 
+# ── 工具函数 ──────────────────────────────────────────────────────────────────
 
 def list_serial_ports() -> list[str]:
-    return sorted(set(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")))
+    """跨平台列出串口：Linux /dev/ttyACM* /dev/ttyUSB*，Windows COM*。"""
+    ports = [p.device for p in serial.tools.list_ports.comports()]
+    return sorted(ports)
 
 
 def _strip_ansi(text: str) -> str:
@@ -66,106 +52,80 @@ def _strip_ansi(text: str) -> str:
     text = re.sub(r"\x1B[@-_]", "", text)
     return text
 
-
-def _configure_serial_fd(fd: int):
-    attrs = termios.tcgetattr(fd)
-    attrs[0] = 0
-    attrs[1] = 0
-    attrs[2] = attrs[2] | termios.CLOCAL | termios.CREAD | termios.CS8
-    attrs[3] = 0
-    attrs[4] = termios.B115200
-    attrs[5] = termios.B115200
-    attrs[6][termios.VMIN] = 0
-    attrs[6][termios.VTIME] = 1
-    termios.tcsetattr(fd, termios.TCSANOW, attrs)
-    tty.setraw(fd)
-    termios.tcflush(fd, termios.TCIOFLUSH)
-
-
 def _classify_serial_output(raw_text: str) -> dict:
     clean = _strip_ansi(raw_text).strip()
     compact = "\n".join(line.rstrip() for line in clean.splitlines() if line.strip())
     if not compact:
-        return {
-            "state": "unknown",
-            "title": "未读取到明确串口输出",
-            "detail": "请确认设备已上电，并按回车后重试。",
-            "excerpt": "",
-        }
-    if any(keyword in compact for keyword in INIT_PENDING_KEYWORDS):
-        return {
-            "state": "not_initialized",
-            "title": "检测到首次启动初始化向导",
-            "detail": "这台 Jetson 还未完成系统初始化，需要通过串口继续配置用户名、密码和基础系统设置。",
-            "excerpt": compact,
-        }
-    if any(re.search(pattern, compact, re.MULTILINE) for pattern in INIT_DONE_PATTERNS):
-        return {
-            "state": "initialized",
-            "title": "检测到正常登录提示",
-            "detail": "设备大概率已经完成初始化，可以直接通过串口登录或继续配置 SSH。",
-            "excerpt": compact,
-        }
-    return {
-        "state": "unknown",
-        "title": "串口已连通，但未识别到明确状态",
-        "detail": "可能处于启动中、停留在其他菜单，或输出较少。建议继续查看串口终端。",
-        "excerpt": compact,
-    }
+        return {"state": "unknown", "title": "未读取到明确串口输出",
+                "detail": "请确认设备已上电，并按回车后重试。", "excerpt": ""}
+    if any(k in compact for k in INIT_PENDING_KEYWORDS):
+        return {"state": "not_initialized", "title": "检测到首次启动初始化向导",
+                "detail": "这台 Jetson 还未完成系统初始化，需要通过串口继续配置用户名、密码和基础系统设置。",
+                "excerpt": compact}
+    if any(re.search(p, compact, re.MULTILINE) for p in INIT_DONE_PATTERNS):
+        return {"state": "initialized", "title": "检测到正常登录提示",
+                "detail": "设备大概率已经完成初始化，可以直接通过串口登录或继续配置 SSH。",
+                "excerpt": compact}
+    return {"state": "unknown", "title": "串口已连通，但未识别到明确状态",
+            "detail": "可能处于启动中、停留在其他菜单，或输出较少。建议继续查看串口终端。",
+            "excerpt": compact}
 
 
 def probe_serial_status(port: str, timeout: float = 4.0) -> dict:
-    original = None
-    fd = None
+    """用 pyserial 探测串口状态，跨平台。"""
     try:
-        fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-        original = termios.tcgetattr(fd)
-        _configure_serial_fd(fd)
-        os.write(fd, b"\r\n")
-        deadline = time.time() + timeout
+        ser = serial.Serial(port, baudrate=115200, timeout=0.25,
+                            bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
+                            stopbits=serial.STOPBITS_ONE)
+        ser.write(b"\r\n")
         chunks: list[bytes] = []
+        deadline = time.time() + timeout
         while time.time() < deadline:
-            readable, _, _ = select.select([fd], [], [], 0.25)
-            if fd not in readable:
-                continue
-            try:
-                data = os.read(fd, 4096)
-            except BlockingIOError:
-                data = b""
+            data = ser.read(4096)
             if data:
                 chunks.append(data)
+        ser.close()
         raw = b"".join(chunks).decode("utf-8", errors="ignore")
         return _classify_serial_output(raw)
     except Exception as exc:
         return {"state": "error", "title": "串口检测失败", "detail": str(exc), "excerpt": ""}
-    finally:
-        if fd is not None:
-            if original is not None:
-                try:
-                    termios.tcsetattr(fd, termios.TCSANOW, original)
-                except Exception:
-                    pass
-            os.close(fd)
 
+
+# ── 外部终端启动（Linux/Windows/macOS）────────────────────────────────────────
 
 def _external_serial_commands(port: str) -> list[str]:
+    if sys.platform == "win32":
+        cmds = []
+        if shutil.which("putty"):
+            cmds.append(f"putty -serial {port} -sercfg 115200,8,n,1,N")
+        if shutil.which("tio"):
+            cmds.append(f"tio {port} -b 115200")
+        return cmds
+    # Linux / macOS
     quoted = shlex.quote(port)
     cmds: list[str] = []
-    if shutil.which("screen"):
-        cmds.append(f"screen {quoted} 115200")
-    if shutil.which("picocom"):
-        cmds.append(f"picocom -b 115200 {quoted}")
-    if shutil.which("tio"):
-        cmds.append(f"tio {quoted} -b 115200")
-    if shutil.which("minicom"):
-        cmds.append(f"minicom -D {quoted} -b 115200")
+    for tool, cmd in [
+        ("screen",   f"screen {quoted} 115200"),
+        ("picocom",  f"picocom -b 115200 {quoted}"),
+        ("tio",      f"tio {quoted} -b 115200"),
+        ("minicom",  f"minicom -D {quoted} -b 115200"),
+    ]:
+        if shutil.which(tool):
+            cmds.append(cmd)
     return cmds
 
 
 def launch_serial_terminal(port: str) -> tuple[bool, str]:
     commands = _external_serial_commands(port)
     if not commands:
-        return False, "未找到可用的外部串口终端工具（screen / picocom / tio / minicom）。"
+        return False, "未找到可用的外部串口终端工具（screen / picocom / tio / minicom / putty）。"
+
+    if sys.platform == "win32":
+        try:
+            subprocess.Popen(commands[0], shell=True)
+            return True, commands[0]
+        except Exception as e:
+            return False, str(e)
 
     terminal_cmds = [
         ["x-terminal-emulator", "-e", "bash", "-lc", commands[0]],
@@ -183,6 +143,7 @@ def launch_serial_terminal(port: str) -> tuple[bool, str]:
             continue
     return False, commands[0]
 
+# ── 串口探测线程 ──────────────────────────────────────────────────────────────
 
 class _ProbeThread(QThread):
     finished_probe = pyqtSignal(dict)
@@ -195,11 +156,93 @@ class _ProbeThread(QThread):
         self.finished_probe.emit(probe_serial_status(self._port))
 
 
+# ── 串口命令执行线程（pyserial，跨平台）──────────────────────────────────────
+
+class _SerialCmdThread(QThread):
+    """通过串口登录 Jetson 并执行一条命令，返回输出。跨平台（pyserial）。"""
+    output = pyqtSignal(str)
+    done   = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, port: str, username: str, password: str, command: str):
+        super().__init__()
+        self._port     = port
+        self._username = username
+        self._password = password
+        self._command  = command
+        self._stop     = False
+        self._ser: serial.Serial | None = None
+
+    def _write(self, data: bytes):
+        if self._ser and self._ser.is_open:
+            self._ser.write(data)
+
+    def _read_until(self, patterns: list[str], timeout: float) -> str:
+        buf = ""
+        deadline = time.time() + timeout
+        while time.time() < deadline and not self._stop:
+            if self._ser and self._ser.in_waiting:
+                chunk = self._ser.read(self._ser.in_waiting).decode("utf-8", errors="ignore")
+                if chunk:
+                    buf += chunk
+                    self.output.emit(chunk)
+            else:
+                time.sleep(0.05)
+            for p in patterns:
+                if re.search(p, buf):
+                    return buf
+        return buf
+
+    def run(self):
+        try:
+            self._ser = serial.Serial(
+                self._port, baudrate=115200, timeout=0.1,
+                bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+            )
+            # 唤醒：多发几次回车
+            for _ in range(3):
+                self._write(b"\r\n")
+                time.sleep(0.3)
+            buf = self._read_until([r"login:", r"[$#]\s*"], 8.0)
+
+            if re.search(r"login:", buf):
+                time.sleep(0.2)
+                self._write((self._username + "\r\n").encode())
+                buf = self._read_until([r"[Pp]assword:", r"[$#]\s*"], 8.0)
+
+            if re.search(r"[Pp]assword:", buf):
+                time.sleep(0.2)
+                self._write((self._password + "\r\n").encode())
+                buf = self._read_until(
+                    [r"[$#]\s*", r"[Ll]ogin incorrect", r"[Aa]uthentication failure"], 10.0)
+
+            if not re.search(r"[$#]\s*", buf):
+                if re.search(r"[Ll]ogin incorrect|[Aa]uthentication failure", buf):
+                    self.failed.emit("用户名或密码错误（Login incorrect）。")
+                else:
+                    self.failed.emit("登录失败，未检测到 shell 提示符。")
+                return
+
+            time.sleep(0.2)
+            self._write((self._command + "\r\n").encode())
+            result = self._read_until([r"[$#]\s*"], 20.0)
+            self.done.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            if self._ser and self._ser.is_open:
+                self._ser.close()
+
+    def stop(self):
+        self._stop = True
+
+# ── Jetson 初始化对话框 ───────────────────────────────────────────────────────
+
 class JetsonInitDialog(QDialog):
     def __init__(self, parent=None, preferred_port: str = ""):
         super().__init__(parent)
         self._probe_thread: _ProbeThread | None = None
-
         self.setWindowTitle("Jetson 初始化")
         self.setMinimumSize(720, 560)
         self.setSizeGripEnabled(True)
@@ -215,7 +258,6 @@ class JetsonInitDialog(QDialog):
             11, C_TEXT2, wrap=True,
         ))
 
-        # 串口选择卡片
         top_card = make_card(12)
         apply_shadow(top_card, blur=18, y=4, alpha=60)
         top_lay = QVBoxLayout(top_card)
@@ -228,9 +270,9 @@ class JetsonInitDialog(QDialog):
         self.port_combo = QComboBox()
         self.port_combo.setMinimumWidth(220)
         port_row.addWidget(self.port_combo)
-        self.refresh_btn = make_button("刷新串口", small=True)
-        self.detect_btn = make_button("检测初始化状态", small=True)
-        self.open_btn = make_button("打开串口终端", primary=True, small=True)
+        self.refresh_btn  = make_button("刷新串口", small=True)
+        self.detect_btn   = make_button("检测初始化状态", small=True)
+        self.open_btn     = make_button("打开串口终端", primary=True, small=True)
         port_row.addWidget(self.refresh_btn)
         port_row.addWidget(self.detect_btn)
         port_row.addWidget(self.open_btn)
@@ -247,12 +289,11 @@ class JetsonInitDialog(QDialog):
             font-size:{pt(11)}pt; font-weight:700;
         """)
         top_lay.addWidget(self.status_badge, alignment=Qt.AlignLeft)
-
-        self.status_text = make_label("选择串口后点击'检测初始化状态'，或直接打开串口终端。", 11, C_TEXT2, wrap=True)
+        self.status_text = make_label(
+            "选择串口后点击'检测初始化状态'，或直接打开串口终端。", 11, C_TEXT2, wrap=True)
         top_lay.addWidget(self.status_text)
         root.addWidget(top_card)
 
-        # 状态摘录
         excerpt_card = make_card(12)
         excerpt_lay = QVBoxLayout(excerpt_card)
         excerpt_lay.setContentsMargins(18, 16, 18, 16)
@@ -265,16 +306,15 @@ class JetsonInitDialog(QDialog):
         self.output_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.output_box.setStyleSheet(f"""
             QTextEdit {{
-                background: {C_CARD_LIGHT}; border: none; border-radius: 10px;
-                color: {C_TEXT2}; padding: 12px;
-                font-size: {pt(10)}pt; font-family: 'JetBrains Mono', 'Consolas', monospace;
+                background:{C_CARD_LIGHT}; border:none; border-radius:10px;
+                color:{C_TEXT2}; padding:12px;
+                font-size:{pt(10)}pt; font-family:'JetBrains Mono','Consolas',monospace;
             }}
         """)
         self.output_box.setPlaceholderText("检测初始化状态后，这里会显示关键状态摘录。")
         excerpt_lay.addWidget(self.output_box)
         root.addWidget(excerpt_card, 1)
 
-        # 使用说明
         guide_card = make_card(12)
         guide_lay = QVBoxLayout(guide_card)
         guide_lay.setContentsMargins(18, 14, 18, 14)
@@ -300,7 +340,6 @@ class JetsonInitDialog(QDialog):
         self.detect_btn.clicked.connect(self.detect_status)
         self.open_btn.clicked.connect(self.open_terminal)
         self.port_combo.currentTextChanged.connect(self._on_port_changed)
-
         self.refresh_ports(preferred_port)
 
     def refresh_ports(self, preferred_port: str = ""):
@@ -310,16 +349,14 @@ class JetsonInitDialog(QDialog):
         self.port_combo.clear()
         self.port_combo.addItems(ports or [""])
         self.port_combo.blockSignals(False)
-
         target = preferred_port or current
         if target and target in ports:
             self.port_combo.setCurrentText(target)
         elif ports:
             self.port_combo.setCurrentIndex(0)
-
         self._update_ui(self.port_combo.currentText())
         if not ports:
-            self._set_state("warn", "未发现串口设备", "当前未检测到 /dev/ttyACM* 或 /dev/ttyUSB*。")
+            self._set_state("warn", "未发现串口设备", "当前未检测到串口设备。")
 
     def _current_port(self) -> str:
         return self.port_combo.currentText().strip()
@@ -329,7 +366,7 @@ class JetsonInitDialog(QDialog):
         if port and commands:
             self.cmd_preview.setText(f"将执行：{commands[0]}")
         elif port:
-            self.cmd_preview.setText("未检测到可用的外部终端工具（screen / picocom / tio / minicom）。")
+            self.cmd_preview.setText("未检测到可用的外部终端工具。")
         else:
             self.cmd_preview.setText("等待检测到可用串口设备")
         has_port = bool(port)
@@ -384,15 +421,11 @@ class JetsonInitDialog(QDialog):
             return
         ok, info = launch_serial_terminal(port)
         if ok:
-            QMessageBox.information(
-                self, "已打开串口终端",
-                f"已在外部终端中打开：\n{info}\n\n请在终端窗口中完成 Jetson 初始化配置。",
-            )
+            QMessageBox.information(self, "已打开串口终端",
+                f"已在外部终端中打开：\n{info}\n\n请在终端窗口中完成 Jetson 初始化配置。")
         else:
-            QMessageBox.warning(
-                self, "无法打开外部终端",
-                f"{info}\n\n请手动在终端中执行上方显示的命令。",
-            )
+            QMessageBox.warning(self, "无法打开外部终端",
+                f"{info}\n\n请手动在终端中执行上方显示的命令。")
 
 
 def open_jetson_init_dialog(parent=None, preferred_port: str = ""):
@@ -400,186 +433,9 @@ def open_jetson_init_dialog(parent=None, preferred_port: str = ""):
     dlg.exec_()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 串口网络配置对话框
-# 流程：串口登录 Jetson → 列出网口 → 填写 IP → 发 nmcli 命令配置
-# ─────────────────────────────────────────────────────────────────────────────
-
-class _SerialLoginThread(QThread):
-    """通过串口发送登录序列，返回登录后的 shell 提示符。"""
-    output   = pyqtSignal(str)   # 实时输出
-    success  = pyqtSignal()      # 登录成功（检测到 shell prompt）
-    failed   = pyqtSignal(str)   # 登录失败原因
-
-    _PROMPT_RE = re.compile(r"[$#]\s*$", re.MULTILINE)
-
-    def __init__(self, port: str, username: str, password: str):
-        super().__init__()
-        self._port     = port
-        self._username = username
-        self._password = password
-        self._fd: int | None = None
-        self._stop = False
-
-    def _write(self, data: bytes):
-        if self._fd is not None:
-            os.write(self._fd, data)
-
-    def _read_until(self, patterns: list[str], timeout: float) -> str:
-        """读取串口直到匹配任一 pattern 或超时，返回累积文本。"""
-        buf = ""
-        deadline = time.time() + timeout
-        while time.time() < deadline and not self._stop:
-            r, _, _ = select.select([self._fd], [], [], 0.2)
-            if self._fd in r:
-                try:
-                    chunk = os.read(self._fd, 4096).decode("utf-8", errors="ignore")
-                except BlockingIOError:
-                    chunk = ""
-                if chunk:
-                    buf += chunk
-                    self.output.emit(chunk)
-            for p in patterns:
-                if re.search(p, buf):
-                    return buf
-        return buf
-
-    def run(self):
-        try:
-            self._fd = os.open(self._port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-            orig = termios.tcgetattr(self._fd)
-            _configure_serial_fd(self._fd)
-
-            # 多次唤醒
-            for _ in range(3):
-                self._write(b"\r\n")
-                time.sleep(0.3)
-            buf = self._read_until([r"login:", r"[$#]\s*", r"[Pp]assword:"], 8.0)
-
-            # 如果已经在 shell，直接成功
-            if re.search(r"[$#]\s*", buf):
-                self.success.emit()
-                return
-
-            # 发用户名
-            if re.search(r"login:", buf):
-                time.sleep(0.2)
-                self._write((self._username + "\r\n").encode())
-                buf = self._read_until([r"[Pp]assword:", r"[$#]\s*"], 8.0)
-
-            # 发密码
-            if re.search(r"[Pp]assword:", buf):
-                time.sleep(0.2)
-                self._write((self._password + "\r\n").encode())
-                buf = self._read_until([r"[$#]\s*", r"[Ll]ogin incorrect", r"[Aa]uthentication failure"], 10.0)
-
-            if re.search(r"[$#]\s*", buf):
-                self.success.emit()
-            else:
-                self.failed.emit("登录失败：用户名或密码错误，或设备未就绪。")
-        except Exception as exc:
-            self.failed.emit(str(exc))
-        finally:
-            if self._fd is not None:
-                try:
-                    termios.tcsetattr(self._fd, termios.TCSANOW, orig)
-                except Exception:
-                    pass
-                os.close(self._fd)
-                self._fd = None
-
-    def stop(self):
-        self._stop = True
-
-
-class _SerialCmdThread(QThread):
-    """登录后执行一条命令，返回输出。"""
-    output   = pyqtSignal(str)
-    done     = pyqtSignal(str)   # 命令完整输出
-    failed   = pyqtSignal(str)
-
-    def __init__(self, port: str, username: str, password: str, command: str):
-        super().__init__()
-        self._port     = port
-        self._username = username
-        self._password = password
-        self._command  = command
-        self._stop     = False
-
-    def _write(self, data: bytes):
-        if self._fd is not None:
-            os.write(self._fd, data)
-
-    def _read_until(self, patterns: list[str], timeout: float) -> str:
-        buf = ""
-        deadline = time.time() + timeout
-        while time.time() < deadline and not self._stop:
-            r, _, _ = select.select([self._fd], [], [], 0.2)
-            if self._fd in r:
-                try:
-                    chunk = os.read(self._fd, 4096).decode("utf-8", errors="ignore")
-                except BlockingIOError:
-                    chunk = ""
-                if chunk:
-                    buf += chunk
-                    self.output.emit(chunk)
-            for p in patterns:
-                if re.search(p, buf):
-                    return buf
-        return buf
-
-    def run(self):
-        self._fd = None
-        try:
-            self._fd = os.open(self._port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-            orig = termios.tcgetattr(self._fd)
-            _configure_serial_fd(self._fd)
-
-            # 多发几次回车唤醒，等待 login: 提示
-            for _ in range(3):
-                self._write(b"\r\n")
-                time.sleep(0.3)
-            buf = self._read_until([r"login:", r"[$#]\s*"], 8.0)
-
-            if re.search(r"login:", buf):
-                time.sleep(0.2)
-                self._write((self._username + "\r\n").encode())
-                buf = self._read_until([r"[Pp]assword:", r"[$#]\s*"], 8.0)
-
-            if re.search(r"[Pp]assword:", buf):
-                time.sleep(0.2)
-                self._write((self._password + "\r\n").encode())
-                buf = self._read_until([r"[$#]\s*", r"[Ll]ogin incorrect", r"[Aa]uthentication failure"], 10.0)
-
-            if not re.search(r"[$#]\s*", buf):
-                if re.search(r"[Ll]ogin incorrect|[Aa]uthentication failure", buf):
-                    self.failed.emit("用户名或密码错误（Login incorrect）。")
-                else:
-                    self.failed.emit("登录失败，未检测到 shell 提示符。")
-                return
-
-            # 执行命令，等待提示符返回
-            time.sleep(0.2)
-            self._write((self._command + "\r\n").encode())
-            result = self._read_until([r"[$#]\s*"], 20.0)
-            self.done.emit(result)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-        finally:
-            if self._fd is not None:
-                try:
-                    termios.tcsetattr(self._fd, termios.TCSANOW, orig)
-                except Exception:
-                    pass
-                os.close(self._fd)
-                self._fd = None
-
-    def stop(self):
-        self._stop = True
-
+# ── Jetson 网络配置对话框 ─────────────────────────────────────────────────────
 
 def _parse_interfaces(ip_link_output: str) -> list[str]:
-    """从 ip link show 输出中提取以太网口名称（排除 lo、docker、virbr 等）。"""
     clean = _strip_ansi(ip_link_output)
     ifaces = re.findall(r"^\d+:\s+([\w@]+):", clean, re.MULTILINE)
     result = []
@@ -612,7 +468,7 @@ class JetsonNetConfigDialog(QDialog):
             11, C_TEXT2, wrap=True,
         ))
 
-        # ── 串口 & 登录 ──
+        # 串口 & 登录
         login_card = make_card(12)
         apply_shadow(login_card, blur=18, y=4, alpha=60)
         ll = QVBoxLayout(login_card)
@@ -634,7 +490,7 @@ class JetsonNetConfigDialog(QDialog):
         cred_row = QHBoxLayout()
         cred_row.setSpacing(8)
         cred_row.addWidget(make_label("用户名", 11, C_TEXT2))
-        self._user_edit = QLineEdit("ubuntu")
+        self._user_edit = QLineEdit("seeed")
         self._user_edit.setFixedWidth(120)
         self._user_edit.setStyleSheet(self._input_style())
         cred_row.addWidget(self._user_edit)
@@ -659,7 +515,7 @@ class JetsonNetConfigDialog(QDialog):
         ll.addLayout(scan_row)
         root.addWidget(login_card)
 
-        # ── 网口 & IP 配置 ──
+        # 网口 & IP 配置
         net_card = make_card(12)
         nl = QVBoxLayout(net_card)
         nl.setContentsMargins(18, 16, 18, 16)
@@ -713,7 +569,7 @@ class JetsonNetConfigDialog(QDialog):
         nl.addLayout(apply_row)
         root.addWidget(net_card)
 
-        # ── 日志 ──
+        # 日志
         log_card = make_card(12)
         log_lay = QVBoxLayout(log_card)
         log_lay.setContentsMargins(18, 14, 18, 14)
@@ -744,17 +600,12 @@ class JetsonNetConfigDialog(QDialog):
         self._refresh_btn.clicked.connect(self._refresh_ports)
         self._scan_btn.clicked.connect(self._do_scan)
         self._apply_btn.clicked.connect(self._do_apply)
-
         self._refresh_ports(preferred_port)
 
     def _input_style(self) -> str:
-        return f"""
-            QLineEdit {{
-                background:{C_CARD_LIGHT}; border:none; border-radius:8px;
-                padding:6px 10px; color:{C_TEXT}; font-size:{pt(11)}pt;
-            }}
-            QLineEdit:focus {{ background:#2a3040; }}
-        """
+        return (f"QLineEdit {{ background:{C_CARD_LIGHT}; border:none; border-radius:8px;"
+                f" padding:6px 10px; color:{C_TEXT}; font-size:{pt(11)}pt; }}"
+                f" QLineEdit:focus {{ background:#2a3040; }}")
 
     def _refresh_ports(self, preferred: str = ""):
         ports = list_serial_ports()
@@ -778,16 +629,14 @@ class JetsonNetConfigDialog(QDialog):
         if not port:
             QMessageBox.warning(self, "提示", "请先选择串口。")
             return
-        user = self._user_edit.text().strip() or "ubuntu"
+        user = self._user_edit.text().strip() or "seeed"
         pwd  = self._pass_edit.text()
-
         self._scan_btn.setEnabled(False)
         self._scan_btn.setText("获取中…")
         self._login_status.setText("正在登录…")
         self._iface_combo.setEnabled(False)
         self._apply_btn.setEnabled(False)
         self._log.clear()
-
         self._cmd_thread = _SerialCmdThread(port, user, pwd, "ip link show")
         self._cmd_thread.output.connect(self._log_append)
         self._cmd_thread.done.connect(self._on_scan_done)
@@ -800,35 +649,37 @@ class JetsonNetConfigDialog(QDialog):
         ifaces = _parse_interfaces(output)
         if not ifaces:
             self._login_status.setText("未找到可用网口")
-            self._login_status.setStyleSheet(f"color:{C_ORANGE}; font-size:{pt(11)}pt; background:transparent;")
+            self._login_status.setStyleSheet(
+                f"color:{C_ORANGE}; font-size:{pt(11)}pt; background:transparent;")
             return
         self._iface_combo.clear()
         self._iface_combo.addItems(ifaces)
         self._iface_combo.setEnabled(True)
         self._apply_btn.setEnabled(True)
         self._login_status.setText(f"登录成功，找到 {len(ifaces)} 个网口")
-        self._login_status.setStyleSheet(f"color:{C_GREEN}; font-size:{pt(11)}pt; background:transparent; font-weight:700;")
+        self._login_status.setStyleSheet(
+            f"color:{C_GREEN}; font-size:{pt(11)}pt; background:transparent; font-weight:700;")
 
     def _on_scan_failed(self, err: str):
         self._scan_btn.setEnabled(True)
         self._scan_btn.setText("登录并获取网口列表")
         self._login_status.setText(f"失败：{err}")
-        self._login_status.setStyleSheet(f"color:{C_RED}; font-size:{pt(11)}pt; background:transparent;")
+        self._login_status.setStyleSheet(
+            f"color:{C_RED}; font-size:{pt(11)}pt; background:transparent;")
 
     def _do_apply(self):
         port  = self._port_combo.currentText().strip()
-        user  = self._user_edit.text().strip() or "ubuntu"
+        user  = self._user_edit.text().strip() or "seeed"
         pwd   = self._pass_edit.text()
         iface = self._iface_combo.currentText().strip()
         ip    = self._ip_edit.text().strip()
         mask  = self._mask_edit.text().strip() or "24"
-        # 支持点分格式（255.255.255.0 → 24）
         if "." in mask:
             try:
                 mask = str(sum(bin(int(x)).count("1") for x in mask.split(".")))
             except Exception:
                 pass
-        gw    = self._gw_edit.text().strip()
+        gw = self._gw_edit.text().strip()
 
         if not ip:
             QMessageBox.warning(self, "提示", "请填写 IP 地址。")
@@ -837,10 +688,9 @@ class JetsonNetConfigDialog(QDialog):
             QMessageBox.warning(self, "提示", "IP 地址格式不正确。")
             return
 
-        # 构造 nmcli 命令，用 sudo -S 从 stdin 传密码，合并为一次 sudo 调用
-        con_name = f"static-{iface}"
-        ip_cidr  = f"{ip}/{mask}"
-        pwd_escaped = self._pass_edit.text().replace("'", "'\\''")
+        con_name    = f"static-{iface}"
+        ip_cidr     = f"{ip}/{mask}"
+        pwd_escaped = pwd.replace("'", "'\\''")
         inner = (
             f"nmcli con delete '{con_name}' 2>/dev/null; "
             f"nmcli con add type ethernet ifname {iface} con-name '{con_name}' "
@@ -853,7 +703,7 @@ class JetsonNetConfigDialog(QDialog):
         self._apply_btn.setEnabled(False)
         self._apply_btn.setText("配置中…")
         self._apply_status.setText("")
-        self._log.append(f"\n[配置] {iface} → {ip_cidr}" + (f" gw {gw}" if gw else "") + "\n")
+        self._log.append(f"\n[配置] {iface} -> {ip_cidr}" + (f" gw {gw}" if gw else "") + "\n")
 
         self._cmd_thread = _SerialCmdThread(port, user, pwd, command)
         self._cmd_thread.output.connect(self._log_append)
@@ -867,16 +717,19 @@ class JetsonNetConfigDialog(QDialog):
         ip = self._ip_edit.text().strip()
         if "Error" in output or "error" in output:
             self._apply_status.setText("配置可能失败，请查看日志")
-            self._apply_status.setStyleSheet(f"color:{C_ORANGE}; font-size:{pt(11)}pt; background:transparent;")
+            self._apply_status.setStyleSheet(
+                f"color:{C_ORANGE}; font-size:{pt(11)}pt; background:transparent;")
         else:
             self._apply_status.setText(f"配置完成，设备 IP：{ip}")
-            self._apply_status.setStyleSheet(f"color:{C_GREEN}; font-size:{pt(11)}pt; background:transparent; font-weight:700;")
+            self._apply_status.setStyleSheet(
+                f"color:{C_GREEN}; font-size:{pt(11)}pt; background:transparent; font-weight:700;")
 
     def _on_apply_failed(self, err: str):
         self._apply_btn.setEnabled(True)
         self._apply_btn.setText("应用配置")
         self._apply_status.setText(f"失败：{err}")
-        self._apply_status.setStyleSheet(f"color:{C_RED}; font-size:{pt(11)}pt; background:transparent;")
+        self._apply_status.setStyleSheet(
+            f"color:{C_RED}; font-size:{pt(11)}pt; background:transparent;")
 
 
 def open_jetson_net_config_dialog(parent=None, preferred_port: str = ""):
