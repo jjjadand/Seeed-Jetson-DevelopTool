@@ -1,7 +1,9 @@
 """Jetson 初始化对话框与串口检测辅助。跨平台实现（pyserial）。"""
 from __future__ import annotations
 
+import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -38,6 +40,8 @@ INIT_DONE_PATTERNS = (
     r"\bPassword:\s*$",
     r"[A-Za-z0-9._-]+@[\w.-]+:",
 )
+
+KNOWN_SERIAL_HOLDER_TOOLS = ("screen", "picocom", "tio", "minicom", "putty", "plink")
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
 
@@ -89,6 +93,150 @@ def probe_serial_status(port: str, timeout: float = 4.0) -> dict:
         return _classify_serial_output(raw)
     except Exception as exc:
         return {"state": "error", "title": "串口检测失败", "detail": str(exc), "excerpt": ""}
+
+
+def _looks_like_port_busy(error_text: str) -> bool:
+    text = (error_text or "").lower()
+    return any(pattern in text for pattern in (
+        "could not open port",
+        "resource busy",
+        "device or resource busy",
+        "access is denied",
+        "permission denied",
+        "errno 16",
+        "errno 13",
+        "设备或资源忙",
+        "拒绝访问",
+    ))
+
+
+def _linux_ps_value(pid: int, field: str) -> str:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), f"-o{field}="],
+            capture_output=True, text=True, timeout=2,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _linux_find_port_holder(port: str) -> dict | None:
+    if shutil.which("lsof"):
+        try:
+            result = subprocess.run(
+                ["lsof", "-F", "pcu", "--", port],
+                capture_output=True, text=True, timeout=3,
+            )
+            pid = None
+            command = ""
+            user = ""
+            for line in result.stdout.splitlines():
+                if line.startswith("p") and line[1:].isdigit():
+                    pid = int(line[1:])
+                elif line.startswith("c") and pid and not command:
+                    command = line[1:].strip()
+                elif line.startswith("u") and pid and not user:
+                    user = line[1:].strip()
+                if pid and command:
+                    return {"pid": pid, "command": command, "user": user}
+        except Exception:
+            pass
+
+    if shutil.which("fuser"):
+        try:
+            result = subprocess.run(
+                ["fuser", port],
+                capture_output=True, text=True, timeout=3,
+            )
+            digits = re.findall(r"\d+", result.stdout or "")
+            if digits:
+                pid = int(digits[0])
+                return {
+                    "pid": pid,
+                    "command": _linux_ps_value(pid, "comm"),
+                    "user": _linux_ps_value(pid, "user"),
+                }
+        except Exception:
+            pass
+    return None
+
+
+def inspect_serial_port_lock(port: str, error_text: str = "") -> dict:
+    info = {
+        "busy": False,
+        "port": port,
+        "pid": None,
+        "command": "",
+        "user": "",
+        "releasable": False,
+        "detail": "",
+    }
+
+    if sys.platform.startswith("linux"):
+        holder = _linux_find_port_holder(port)
+        if holder:
+            command = holder.get("command", "") or "未知进程"
+            pid = holder.get("pid")
+            lower = command.lower()
+            info.update(holder)
+            info["busy"] = True
+            info["releasable"] = any(tool in lower for tool in KNOWN_SERIAL_HOLDER_TOOLS)
+            info["detail"] = f"检测到 {command} (PID {pid}) 正在占用 {port}。"
+            if info["releasable"]:
+                info["detail"] += " 可在客户端内尝试释放该占用。"
+            else:
+                info["detail"] += " 请先关闭占用该串口的程序后再重试。"
+            return info
+
+    if _looks_like_port_busy(error_text):
+        info["busy"] = True
+        if sys.platform == "win32":
+            info["detail"] = (
+                f"{port} 当前可能被其他串口工具占用。"
+                "请先关闭 PuTTY、MobaXterm、串口调试助手等程序后重试。"
+            )
+        else:
+            info["detail"] = f"{port} 当前可能被其他程序占用。请先关闭外部串口终端后重试。"
+    return info
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def release_serial_port_lock(lock_info: dict) -> tuple[bool, str]:
+    if not lock_info.get("busy"):
+        return True, "当前未检测到串口占用。"
+    if not sys.platform.startswith("linux"):
+        return False, "当前平台暂不支持自动释放串口，请先关闭外部串口工具。"
+    if not lock_info.get("releasable"):
+        return False, "当前占用进程不属于受支持的串口终端，请手动关闭后再重试。"
+
+    pid = lock_info.get("pid")
+    command = lock_info.get("command", "外部串口工具")
+    if not pid:
+        return False, "未能识别占用进程 PID，请手动关闭对应程序。"
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True, f"{command} 已退出，串口占用已释放。"
+    except Exception as exc:
+        return False, f"释放失败：{exc}"
+
+    deadline = time.time() + 1.5
+    while time.time() < deadline:
+        if not _pid_exists(pid):
+            return True, f"已结束 {command} (PID {pid})，可重新尝试连接串口。"
+        time.sleep(0.1)
+    return False, f"未能自动结束 {command} (PID {pid})，请手动关闭后再重试。"
 
 
 # ── 外部终端启动（Linux/Windows/macOS）────────────────────────────────────────
@@ -243,6 +391,7 @@ class JetsonInitDialog(QDialog):
     def __init__(self, parent=None, preferred_port: str = ""):
         super().__init__(parent)
         self._probe_thread: _ProbeThread | None = None
+        self._lock_info: dict | None = None
         self.setWindowTitle("Jetson 初始化")
         self.setMinimumSize(720, 560)
         self.setSizeGripEnabled(True)
@@ -292,6 +441,17 @@ class JetsonInitDialog(QDialog):
         self.status_text = make_label(
             "选择串口后点击'检测初始化状态'，或直接打开串口终端。", 11, C_TEXT2, wrap=True)
         top_lay.addWidget(self.status_text)
+
+        lock_row = QHBoxLayout()
+        lock_row.setSpacing(10)
+        self.lock_hint = make_label("", 10, C_ORANGE, wrap=True)
+        self.lock_hint.hide()
+        self.release_lock_btn = make_button("释放串口占用", small=True)
+        self.release_lock_btn.hide()
+        self.release_lock_btn.clicked.connect(self._release_port_lock)
+        lock_row.addWidget(self.lock_hint, 1)
+        lock_row.addWidget(self.release_lock_btn)
+        top_lay.addLayout(lock_row)
         root.addWidget(top_card)
 
         excerpt_card = make_card(12)
@@ -386,11 +546,43 @@ class JetsonInitDialog(QDialog):
         """)
         self.status_text.setText(detail)
 
+    def _set_lock_info(self, info: dict | None):
+        self._lock_info = info if info and info.get("busy") else None
+        if self._lock_info:
+            self.lock_hint.setText(self._lock_info.get("detail", ""))
+            self.lock_hint.show()
+            self.release_lock_btn.setVisible(bool(self._lock_info.get("releasable")))
+        else:
+            self.lock_hint.hide()
+            self.lock_hint.setText("")
+            self.release_lock_btn.hide()
+
+    def _release_port_lock(self):
+        if not self._lock_info:
+            return
+        reply = QMessageBox.question(
+            self,
+            "释放串口占用",
+            self._lock_info.get("detail", "") + "\n\n是否尝试释放该串口占用？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        ok, msg = release_serial_port_lock(self._lock_info)
+        if ok:
+            QMessageBox.information(self, "释放成功", msg)
+            self._set_lock_info(None)
+            self.refresh_ports(self._current_port())
+        else:
+            QMessageBox.warning(self, "释放失败", msg)
+
     def detect_status(self):
         port = self._current_port()
         if not port:
             QMessageBox.warning(self, "提示", "请先选择串口。")
             return
+        self._set_lock_info(None)
         self.detect_btn.setEnabled(False)
         self.detect_btn.setText("检测中…")
         self._set_state("info", "检测中", f"正在读取 {port} 的串口输出…")
@@ -405,12 +597,16 @@ class JetsonInitDialog(QDialog):
         state = result.get("state", "unknown")
         if state == "not_initialized":
             self._set_state("warn", "未初始化", result.get("detail", ""))
+            self._set_lock_info(None)
         elif state == "initialized":
             self._set_state("ok", "已初始化", result.get("detail", ""))
+            self._set_lock_info(None)
         elif state == "error":
             self._set_state("error", "检测失败", result.get("detail", ""))
+            self._set_lock_info(inspect_serial_port_lock(self._current_port(), result.get("detail", "")))
         else:
             self._set_state("info", "状态未知", result.get("detail", ""))
+            self._set_lock_info(None)
         excerpt = result.get("excerpt", "").strip()
         self.output_box.setPlainText(excerpt or result.get("detail", ""))
 
@@ -422,7 +618,7 @@ class JetsonInitDialog(QDialog):
         ok, info = launch_serial_terminal(port)
         if ok:
             QMessageBox.information(self, "已打开串口终端",
-                f"已在外部终端中打开：\n{info}\n\n请在终端窗口中完成 Jetson 初始化配置。")
+                f"已在外部终端中打开：\n{info}\n\n请在终端窗口中完成 Jetson 初始化配置。使用结束后请完全退出该终端程序，否则串口会继续被占用。")
         else:
             QMessageBox.warning(self, "无法打开外部终端",
                 f"{info}\n\n请手动在终端中执行上方显示的命令。")
@@ -453,6 +649,7 @@ class JetsonNetConfigDialog(QDialog):
     def __init__(self, parent=None, preferred_port: str = ""):
         super().__init__(parent)
         self._cmd_thread: _SerialCmdThread | None = None
+        self._lock_info: dict | None = None
         self.setWindowTitle("Jetson 网络配置（串口）")
         self.setMinimumSize(680, 620)
         self.setSizeGripEnabled(True)
@@ -513,6 +710,17 @@ class JetsonNetConfigDialog(QDialog):
         scan_row.addWidget(self._login_status)
         scan_row.addStretch()
         ll.addLayout(scan_row)
+
+        lock_row = QHBoxLayout()
+        lock_row.setSpacing(10)
+        self._lock_hint = make_label("", 10, C_ORANGE, wrap=True)
+        self._lock_hint.hide()
+        self._release_btn = make_button("释放串口占用", small=True)
+        self._release_btn.hide()
+        self._release_btn.clicked.connect(self._release_port_lock)
+        lock_row.addWidget(self._lock_hint, 1)
+        lock_row.addWidget(self._release_btn)
+        ll.addLayout(lock_row)
         root.addWidget(login_card)
 
         # 网口 & IP 配置
@@ -618,6 +826,37 @@ class JetsonNetConfigDialog(QDialog):
         elif ports:
             self._port_combo.setCurrentIndex(0)
 
+    def _set_lock_info(self, info: dict | None):
+        self._lock_info = info if info and info.get("busy") else None
+        if self._lock_info:
+            self._lock_hint.setText(self._lock_info.get("detail", ""))
+            self._lock_hint.show()
+            self._release_btn.setVisible(bool(self._lock_info.get("releasable")))
+        else:
+            self._lock_hint.hide()
+            self._lock_hint.setText("")
+            self._release_btn.hide()
+
+    def _release_port_lock(self):
+        if not self._lock_info:
+            return
+        reply = QMessageBox.question(
+            self,
+            "释放串口占用",
+            self._lock_info.get("detail", "") + "\n\n是否尝试释放该串口占用？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        ok, msg = release_serial_port_lock(self._lock_info)
+        if ok:
+            QMessageBox.information(self, "释放成功", msg)
+            self._set_lock_info(None)
+            self._refresh_ports(self._port_combo.currentText().strip())
+        else:
+            QMessageBox.warning(self, "释放失败", msg)
+
     def _log_append(self, text: str):
         clean = _strip_ansi(text).replace("\r\n", "\n").replace("\r", "\n")
         if clean.strip():
@@ -629,6 +868,7 @@ class JetsonNetConfigDialog(QDialog):
         if not port:
             QMessageBox.warning(self, "提示", "请先选择串口。")
             return
+        self._set_lock_info(None)
         user = self._user_edit.text().strip() or "seeed"
         pwd  = self._pass_edit.text()
         self._scan_btn.setEnabled(False)
@@ -646,6 +886,7 @@ class JetsonNetConfigDialog(QDialog):
     def _on_scan_done(self, output: str):
         self._scan_btn.setEnabled(True)
         self._scan_btn.setText("登录并获取网口列表")
+        self._set_lock_info(None)
         ifaces = _parse_interfaces(output)
         if not ifaces:
             self._login_status.setText("未找到可用网口")
@@ -666,6 +907,7 @@ class JetsonNetConfigDialog(QDialog):
         self._login_status.setText(f"失败：{err}")
         self._login_status.setStyleSheet(
             f"color:{C_RED}; font-size:{pt(11)}pt; background:transparent;")
+        self._set_lock_info(inspect_serial_port_lock(self._port_combo.currentText().strip(), err))
 
     def _do_apply(self):
         port  = self._port_combo.currentText().strip()
@@ -687,6 +929,7 @@ class JetsonNetConfigDialog(QDialog):
         if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
             QMessageBox.warning(self, "提示", "IP 地址格式不正确。")
             return
+        self._set_lock_info(None)
 
         con_name    = f"static-{iface}"
         ip_cidr     = f"{ip}/{mask}"
@@ -714,6 +957,7 @@ class JetsonNetConfigDialog(QDialog):
     def _on_apply_done(self, output: str):
         self._apply_btn.setEnabled(True)
         self._apply_btn.setText("应用配置")
+        self._set_lock_info(None)
         ip = self._ip_edit.text().strip()
         if "Error" in output or "error" in output:
             self._apply_status.setText("配置可能失败，请查看日志")
@@ -730,6 +974,7 @@ class JetsonNetConfigDialog(QDialog):
         self._apply_status.setText(f"失败：{err}")
         self._apply_status.setStyleSheet(
             f"color:{C_RED}; font-size:{pt(11)}pt; background:transparent;")
+        self._set_lock_info(inspect_serial_port_lock(self._port_combo.currentText().strip(), err))
 
 
 def open_jetson_net_config_dialog(parent=None, preferred_port: str = ""):
