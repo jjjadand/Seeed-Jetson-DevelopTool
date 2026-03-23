@@ -12,7 +12,7 @@ from PyQt5.QtGui import QColor, QPixmap, QPainter
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame,
     QVBoxLayout, QHBoxLayout, QGridLayout, QBoxLayout,
-    QLabel, QPushButton, QComboBox, QCheckBox,
+    QLabel, QPushButton, QComboBox, QCheckBox, QToolButton, QMenu,
     QProgressBar, QTextEdit, QScrollArea, QDialog, QFileDialog,
     QStackedWidget, QSizePolicy,
 )
@@ -31,6 +31,7 @@ from ..core.events import bus
 from ..modules.remote.jetson_init import open_jetson_init_dialog
 from .flash_animation import FlashAnimationWidget
 from .ai_chat import FloatingAIAssistant, build_ai_system_prompt
+from .runtime_i18n import apply_language, translate_text
 
 
 # ─────────────────────────────────────────────
@@ -395,6 +396,7 @@ class MainWindowV2(QMainWindow):
         super().__init__()
         self.data_path = Path(__file__).parent.parent / "data"
         self.project_root = Path(__file__).resolve().parents[2]
+        self._lang = "en"
         self._drag = False
         self._drag_pos = QPoint()
         self._resize_edge = None   # 当前拖拽的边缘方向
@@ -414,6 +416,9 @@ class MainWindowV2(QMainWindow):
         self.recovery_guides = {}
         self.products = {}
         self._load_data()
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
         self._init_ui()
 
     def _load_data(self):
@@ -435,7 +440,7 @@ class MainWindowV2(QMainWindow):
 
     def _init_ui(self):
         self.setWindowTitle("Seeed Jetson Develop Tool")
-        self.setMinimumSize(1080, 720)
+        self.setMinimumSize(1120 if self._lang == "en" else 1080, 720)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setMouseTracking(True)   # 不按键也能收到 mouseMoveEvent，用于边缘 cursor 更新
 
@@ -482,6 +487,7 @@ class MainWindowV2(QMainWindow):
 
         self._set_page(0)
         self._floating_ai = FloatingAIAssistant(self, system_prompt=build_ai_system_prompt())
+        self._apply_runtime_language()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -537,6 +543,63 @@ class MainWindowV2(QMainWindow):
             padding: 0;
         """)
         lay.addWidget(self.status_dot)
+
+        self.lang_menu_btn = QToolButton()
+        self.lang_menu_btn.setCursor(Qt.PointingHandCursor)
+        self.lang_menu_btn.setPopupMode(QToolButton.InstantPopup)
+        self.lang_menu_btn.setFixedSize(pt(124), pt(34))
+        self.lang_menu_btn.setStyleSheet(f"""
+            QToolButton {{
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.10);
+                border-radius: 8px;
+                color: {C_TEXT2};
+                font-size: {pt(10)}pt;
+                font-weight: 600;
+                padding: 0 24px 0 12px;
+                text-align: left;
+            }}
+            QToolButton:hover {{
+                background: rgba(255,255,255,0.10);
+                color: {C_TEXT};
+            }}
+            QToolButton::menu-indicator {{
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                right: 10px;
+                image: none;
+                width: 0;
+                height: 0;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid {C_TEXT2};
+            }}
+        """)
+
+        self.lang_menu = QMenu(self.lang_menu_btn)
+        self.lang_menu.setStyleSheet(f"""
+            QMenu {{
+                background: {C_CARD};
+                color: {C_TEXT};
+                border: 1px solid rgba(255,255,255,0.08);
+                padding: 6px 0;
+            }}
+            QMenu::item {{
+                padding: 8px 18px;
+                background: transparent;
+            }}
+            QMenu::item:selected {{
+                background: rgba(122,179,23,0.18);
+            }}
+        """)
+        self._lang_actions = {}
+        for code, text in [("en", "English"), ("zh", "中文")]:
+            action = self.lang_menu.addAction(text)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked=False, lang=code: self._set_language(lang))
+            self._lang_actions[code] = action
+        self.lang_menu_btn.setMenu(self.lang_menu)
+        lay.addWidget(self.lang_menu_btn)
 
         lay.addSpacing(16)
 
@@ -647,6 +710,8 @@ class MainWindowV2(QMainWindow):
         super().mouseReleaseEvent(ev)
 
     def eventFilter(self, src, ev):
+        if self._lang == "en" and ev.type() == QEvent.Show and isinstance(src, QWidget):
+            QTimer.singleShot(0, lambda w=src: apply_language(w, self._lang))
         if src is getattr(self, "_titlebar", None):
             if ev.type() == QEvent.MouseButtonDblClick:
                 self._toggle_max(); return True
@@ -663,8 +728,9 @@ class MainWindowV2(QMainWindow):
     # ── 侧边栏 - 无右边框 ──────────────────────
     def _build_sidebar(self):
         sidebar = QWidget()
-        sidebar.setFixedWidth(pt(200))
+        sidebar.setFixedWidth(pt(220) if self._lang == "en" else pt(200))
         sidebar.setStyleSheet(f"background: {C_BG_DEEP};")
+        self._sidebar = sidebar
 
         lay = QVBoxLayout(sidebar)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -716,13 +782,13 @@ class MainWindowV2(QMainWindow):
             return
         pad = pt(20)
         if self._is_jetson:
-            self._env_dot.setText("● Jetson 本机")
+            self._env_dot.setText("● " + translate_text("Jetson 本机", self._lang))
             self._env_dot.setStyleSheet(f"color:{C_GREEN}; font-size:{pt(10)}pt; background:transparent; padding:8px 0 4px {pad}px;")
         elif self._remote_connected:
-            self._env_dot.setText("● 远程已连接")
+            self._env_dot.setText("● " + translate_text("远程已连接", self._lang))
             self._env_dot.setStyleSheet(f"color:{C_BLUE}; font-size:{pt(10)}pt; background:transparent; padding:8px 0 4px {pad}px;")
         else:
-            self._env_dot.setText("● 未连接设备")
+            self._env_dot.setText("● " + translate_text("未连接设备", self._lang))
             self._env_dot.setStyleSheet(f"color:{C_ORANGE}; font-size:{pt(10)}pt; background:transparent; padding:8px 0 4px {pad}px;")
 
     def _on_remote_connected(self, payload: dict):
@@ -1351,11 +1417,18 @@ class MainWindowV2(QMainWindow):
         versions = len(self.products.get(product, []))
         getting_started = info.get("getting_started", "").strip()
         hardware_interfaces = info.get("hardware_interfaces", "").strip()
-        self.flash_info.setText(
-            f"型号：{name}<br>"
-            f"可用版本：{versions} 个<br>"
-            "文档快捷入口：使用下方按钮打开"
-        )
+        if self._lang == "en":
+            self.flash_info.setText(
+                f"Model: {name}<br>"
+                f"Available Versions: {versions}<br>"
+                "Documentation: use the buttons below"
+            )
+        else:
+            self.flash_info.setText(
+                f"型号：{name}<br>"
+                f"可用版本：{versions} 个<br>"
+                "文档快捷入口：使用下方按钮打开"
+            )
         self._set_flash_doc_button(
             self.flash_getting_started_btn,
             getting_started,
@@ -1407,7 +1480,8 @@ class MainWindowV2(QMainWindow):
             has_archive  = flasher.firmware_cached()
             has_extracted = flasher.firmware_extracted()
             if has_extracted:
-                self.flash_cache_lbl.setText("✓ 已下载并解压，可直接刷写（跳过下载）")
+                text = "✓ Firmware downloaded and extracted. You can flash directly." if self._lang == "en" else "✓ 已下载并解压，可直接刷写（跳过下载）"
+                self.flash_cache_lbl.setText(text)
                 self.flash_cache_lbl.setStyleSheet(f"color:{C_GREEN}; font-size:{pt(11)}pt; background:transparent;")
                 if hasattr(self, "flash_prepare_scene"):
                     self.flash_prepare_scene.set_mode("idle")
@@ -1416,14 +1490,18 @@ class MainWindowV2(QMainWindow):
             elif has_archive:
                 fp = flasher.download_dir / flasher.firmware_info['filename']
                 size_mb = fp.stat().st_size / 1024 / 1024
-                self.flash_cache_lbl.setText(f"✓ 已缓存压缩包 {size_mb:.0f} MB，刷写时将自动解压")
+                if self._lang == "en":
+                    self.flash_cache_lbl.setText(f"✓ Cached archive: {size_mb:.0f} MB. It will be extracted automatically.")
+                else:
+                    self.flash_cache_lbl.setText(f"✓ 已缓存压缩包 {size_mb:.0f} MB，刷写时将自动解压")
                 self.flash_cache_lbl.setStyleSheet(f"color:{C_BLUE}; font-size:{pt(11)}pt; background:transparent;")
                 if hasattr(self, "flash_prepare_scene") and not self.flash_cancel_btn.isVisible():
                     self.flash_prepare_scene.set_mode("idle")
                     self.flash_prepare_scene.set_download_progress(0.0)
                 self._set_next_enabled(False)
             else:
-                self.flash_cache_lbl.setText("⚠ 无本地缓存，请先点击「下载/解压 BSP」")
+                text = "⚠ No local cache found. Click Download / Extract BSP first." if self._lang == "en" else "⚠ 无本地缓存，请先点击「下载/解压 BSP」"
+                self.flash_cache_lbl.setText(text)
                 self.flash_cache_lbl.setStyleSheet(f"""
                     color: {C_ORANGE};
                     font-size: {pt(11)}pt;
@@ -1697,7 +1775,7 @@ class MainWindowV2(QMainWindow):
         self.flash_step_stack.setCurrentIndex(1)
         self.flash_left_stack.setCurrentIndex(1)
         self._build_recovery_guide(self.flash_product_combo.currentText())
-        self.rec_status_lbl.setText("等待检测...")
+        self.rec_status_lbl.setText("Waiting for detection..." if self._lang == "en" else "等待检测...")
         self.rec_status_lbl.setStyleSheet(f"color:{C_TEXT2}; background:transparent;")
         self.rec_flash_btn.setEnabled(False)
         if hasattr(self, "flash_scene"):
@@ -1728,9 +1806,9 @@ class MainWindowV2(QMainWindow):
         self._set_wizard_step(0)
         self.flash_step_stack.setCurrentIndex(0)
         self.flash_left_stack.setCurrentIndex(0)
-        self.flash_status_lbl.setText("尚未开始")
+        self.flash_status_lbl.setText("Not started" if self._lang == "en" else "尚未开始")
         self.flash_status_lbl.setStyleSheet(f"color:{C_TEXT2}; background:transparent;")
-        self.flash_run_status_lbl.setText("准备开始刷写...")
+        self.flash_run_status_lbl.setText("Preparing to flash..." if self._lang == "en" else "准备开始刷写...")
         self.flash_run_status_lbl.setStyleSheet(f"color:{C_TEXT2}; background:transparent;")
         self.flash_progress.setVisible(False)
         self.flash_progress.setValue(0)
@@ -2000,11 +2078,11 @@ class MainWindowV2(QMainWindow):
                     if not pix.isNull():
                         self._set_guide_image_preview(label, pix, title)
                     else:
-                        label.setText("图片加载失败")
+                        label.setText("Image preview failed" if self._lang == "en" else "图片加载失败")
                 QTimer.singleShot(0, update)
             except Exception:
                 def show_fail():
-                    label.setText("图片加载失败")
+                    label.setText("Image preview failed" if self._lang == "en" else "图片加载失败")
                     label.setStyleSheet(
                         f"color:{C_TEXT3}; background:{C_CARD_LIGHT}; border-radius:8px; font-size:{pt(10)}pt;"
                     )
@@ -2058,16 +2136,19 @@ class MainWindowV2(QMainWindow):
                             self._flash_log(f"[INFO] 检测到 Recovery 设备: {line.strip()}")
                             break
             if found:
-                self.rec_status_lbl.setText("✓ 已检测到 Jetson Recovery 设备，可以开始刷写")
+                text = "✓ Jetson Recovery device detected. Ready to flash." if self._lang == "en" else "✓ 已检测到 Jetson Recovery 设备，可以开始刷写"
+                self.rec_status_lbl.setText(text)
                 self.rec_status_lbl.setStyleSheet(f"color:{C_GREEN}; background:transparent;")
                 self.rec_flash_btn.setEnabled(True)
             else:
-                self.rec_status_lbl.setText("✗ 未检测到 Recovery 设备，请检查连接和 Recovery 模式")
+                text = "✗ No Recovery device detected. Check the cable and Recovery mode." if self._lang == "en" else "✗ 未检测到 Recovery 设备，请检查连接和 Recovery 模式"
+                self.rec_status_lbl.setText(text)
                 self.rec_status_lbl.setStyleSheet(f"color:{C_ORANGE}; background:transparent;")
                 self.rec_flash_btn.setEnabled(False)
                 self._flash_log("[WARN] lsusb 未找到 NVIDIA APX 设备")
         except Exception as e:
-            self.rec_status_lbl.setText(f"检测失败: {e}")
+            prefix = "Detection failed" if self._lang == "en" else "检测失败"
+            self.rec_status_lbl.setText(f"{prefix}: {e}")
             self.rec_status_lbl.setStyleSheet(f"color:{C_RED}; background:transparent;")
             self._flash_log(f"[ERR] lsusb 执行失败: {e}")
 
@@ -2442,6 +2523,37 @@ class MainWindowV2(QMainWindow):
         url = self._get_product_purchase_url(product)
         if url:
             self._open_url(url)
+
+    def _sync_language_selector(self):
+        if not hasattr(self, "lang_menu_btn"):
+            return
+        self.lang_menu_btn.setText("Language" if self._lang == "en" else "语言")
+        self.lang_menu_btn.setToolTip(
+            "切换界面语言" if self._lang == "zh" else "Switch interface language"
+        )
+        for code, action in getattr(self, "_lang_actions", {}).items():
+            action.setChecked(code == self._lang)
+
+    def _set_language(self, lang: str):
+        if not lang or lang == self._lang:
+            return
+        self._lang = lang
+        self._apply_runtime_language()
+
+    def _apply_runtime_language(self):
+        apply_language(self, self._lang)
+        self.setMinimumSize(1120 if self._lang == "en" else 1080, 720)
+        if hasattr(self, "_sidebar"):
+            self._sidebar.setFixedWidth(pt(220) if self._lang == "en" else pt(200))
+        if hasattr(self, "status_dot"):
+            self.status_dot.setText(translate_text("就绪", self._lang))
+        self._update_env_label()
+        self._sync_language_selector()
+        if hasattr(self, "flash_product_combo"):
+            self._on_flash_product_changed(self.flash_product_combo.currentText())
+        if hasattr(self, "community_buy_combo"):
+            self._update_community_buy_button(self.community_buy_combo.currentText())
+        self._update_flash_adaptive_layout()
 
     def _open_url(self, url):
         from PyQt5.QtGui import QDesktopServices
