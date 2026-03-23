@@ -68,7 +68,7 @@ class Runner:
             return -1, str(e)
 
 
-class SSHRunner:
+class SSHRunner(Runner):
     """
     远程 SSH 命令执行器，接口与 Runner 一致。
     每次 run() 建立一条独立 SSH 连接，适合诊断类低频调用。
@@ -118,6 +118,114 @@ class SSHRunner:
                 client.close()
         except Exception as e:
             return -1, str(e)
+
+
+class SerialRunner(Runner):
+    """
+    通过串口登录 Jetson 并执行命令，接口与 SSHRunner 一致。
+    每次 run() 建立一次串口会话，适合诊断类低频调用。
+    """
+
+    def __init__(self, port: str, username: str = "seeed", password: str = ""):
+        self.port = port
+        self.username = username
+        self.password = password
+
+    def run(
+        self,
+        cmd: str,
+        timeout: int = 30,
+        on_output: Optional[Callable[[str], None]] = None,
+    ) -> tuple[int, str]:
+        import re
+        import time
+        try:
+            import serial
+        except ImportError:
+            return -1, "pyserial 未安装，请运行 pip install pyserial"
+
+        lines: list[str] = []
+
+        def _emit(text: str):
+            if on_output:
+                on_output(text)
+            lines.append(text)
+
+        try:
+            ser = serial.Serial(
+                self.port, baudrate=115200, timeout=0.1,
+                bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+            )
+        except Exception as exc:
+            return -1, str(exc)
+
+        def _read_until(patterns: list[str], wait: float) -> str:
+            buf = ""
+            deadline = time.time() + wait
+            while time.time() < deadline:
+                if ser.in_waiting:
+                    chunk = ser.read(ser.in_waiting).decode("utf-8", errors="ignore")
+                    if chunk:
+                        buf += chunk
+                else:
+                    time.sleep(0.05)
+                for p in patterns:
+                    if re.search(p, buf):
+                        return buf
+            return buf
+
+        try:
+            for _ in range(3):
+                ser.write(b"\r\n")
+                time.sleep(0.3)
+            buf = _read_until([r"login:", r"[$#]\s*"], 8.0)
+
+            if re.search(r"login:", buf):
+                time.sleep(0.2)
+                ser.write((self.username + "\r\n").encode())
+                buf = _read_until([r"[Pp]assword:", r"[$#]\s*"], 8.0)
+
+            if re.search(r"[Pp]assword:", buf):
+                time.sleep(0.2)
+                ser.write((self.password + "\r\n").encode())
+                buf = _read_until(
+                    [r"[$#]\s*", r"[Ll]ogin incorrect", r"[Aa]uthentication failure"], 10.0)
+
+            if not re.search(r"[$#]\s*", buf):
+                if re.search(r"[Ll]ogin incorrect|[Aa]uthentication failure", buf):
+                    return -1, "用户名或密码错误"
+                return -1, "登录失败，未检测到 shell 提示符"
+
+            time.sleep(0.2)
+            ser.write((cmd + "\r\n").encode())
+            result = _read_until([r"[$#]\s*"], float(timeout))
+
+            # 去掉 ANSI 转义码，提取命令输出
+            clean = re.sub(r"\x1B\[[0-?]*[ -/]*[@-~]", "", result)
+            clean = re.sub(r"\x1B[@-_]", "", clean)
+            # 去掉回显的命令行和最后的提示符
+            out_lines = []
+            skip_first = True
+            for line in clean.splitlines():
+                stripped = line.strip()
+                if skip_first and cmd.strip() in stripped:
+                    skip_first = False
+                    continue
+                if re.search(r"[$#]\s*$", stripped) and not stripped.replace("$", "").replace("#", "").strip():
+                    continue
+                if stripped:
+                    out_lines.append(stripped)
+                    if on_output:
+                        on_output(stripped)
+            return 0, "\n".join(out_lines)
+        except Exception as exc:
+            return -1, str(exc)
+        finally:
+            try:
+                ser.close()
+            except Exception:
+                pass
 
 
 # ── 全局活跃 Runner 单例 ────────────────────────────────────────────────────

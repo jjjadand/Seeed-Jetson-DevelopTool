@@ -18,6 +18,8 @@ from seeed_jetson_develop.modules.remote.jetson_init import (
     open_jetson_net_config_dialog,
 )
 from seeed_jetson_develop.modules.remote.net_share_dialog import open_net_share_dialog
+from seeed_jetson_develop.modules.remote.desktop_dialog import open_desktop_dialog
+from seeed_jetson_develop.modules.remote.agent_install_dialog import open_agent_install_dialog
 from seeed_jetson_develop.gui.theme import (
     C_BG, C_BG_DEEP, C_CARD, C_CARD_LIGHT,
     C_GREEN, C_BLUE, C_ORANGE, C_RED,
@@ -26,6 +28,62 @@ from seeed_jetson_develop.gui.theme import (
     make_card as _card, make_input_card as _input_card,
     apply_shadow as _shadow,
 )
+
+
+def _show_need_connection_dialog(parent: QWidget, tool_name: str):
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("需要先连接设备")
+    dlg.setModal(True)
+    dlg.setMinimumWidth(460)
+    dlg.setStyleSheet(f"background:{C_BG}; color:{C_TEXT}; border:none;")
+
+    lay = QVBoxLayout(dlg)
+    lay.setContentsMargins(24, 22, 24, 20)
+    lay.setSpacing(16)
+
+    title_row = QHBoxLayout()
+    title_row.setSpacing(12)
+    icon = QLabel("⚠")
+    icon.setStyleSheet(f"color:{C_ORANGE}; font-size:{_pt(26)}px; background:transparent;")
+    icon.setAlignment(Qt.AlignTop)
+    title_row.addWidget(icon)
+
+    title_col = QVBoxLayout()
+    title_col.setSpacing(4)
+    title_col.addWidget(_lbl("请先连接 Jetson 设备", 15, C_TEXT, bold=True))
+    title_col.addWidget(_lbl(
+        f"当前功能“{tool_name}”需要通过 SSH 与 Jetson 通信后才能继续。",
+        11, C_TEXT2, wrap=True
+    ))
+    title_row.addLayout(title_col, 1)
+    lay.addLayout(title_row)
+
+    hint = QFrame()
+    hint.setStyleSheet(f"""
+        background: {C_CARD_LIGHT};
+        border: none;
+        border-radius: 12px;
+    """)
+    hint_lay = QVBoxLayout(hint)
+    hint_lay.setContentsMargins(16, 14, 16, 14)
+    hint_lay.setSpacing(8)
+    hint_lay.addWidget(_lbl("下一步这样做", 12, C_GREEN, bold=True))
+    hint_lay.addWidget(_lbl(
+        "1. 回到本页上方的“设备连接”卡片。\n"
+        "2. 输入 Jetson 的 IP、用户名和密码。\n"
+        "3. 点击“连接 / 检测 SSH”，连接成功后再回来使用这个功能。",
+        11, C_TEXT2, wrap=True
+    ))
+    lay.addWidget(hint)
+
+    btn_row = QHBoxLayout()
+    btn_row.addStretch()
+    ok_btn = _btn("知道了", primary=True, small=True)
+    ok_btn.clicked.connect(dlg.accept)
+    btn_row.addWidget(ok_btn)
+    lay.addLayout(btn_row)
+
+    dlg.exec_()
 
 
 # ── 局域网扫描线程 ────────────────────────────────────────────────────────────
@@ -914,19 +972,24 @@ def build_page() -> QWidget:
 
     init_btn_row = QHBoxLayout()
     init_btn_row.setSpacing(10)
-    init_refresh_btn = _btn("刷新串口", small=True)
-    init_open_btn = _btn("打开初始化面板", primary=True, small=True)
+    _init_detected_ports = [""]
+    init_terminal_btn = _btn("进入串口终端", primary=True, small=True)
+    init_open_btn = _btn("打开初始化面板", small=True)
     init_net_btn  = _btn("配置网络 IP", small=True)
     init_share_btn = _btn("🌐 网络共享", small=True)
-    init_btn_row.addWidget(init_refresh_btn)
+    init_btn_row.addWidget(init_terminal_btn)
     init_btn_row.addWidget(init_open_btn)
     init_btn_row.addWidget(init_net_btn)
     init_btn_row.addWidget(init_share_btn)
     init_btn_row.addStretch()
     init_lay.addLayout(init_btn_row)
 
+    def _preferred_init_port() -> str:
+        return _init_detected_ports[0] if _init_detected_ports else ""
+
     def _refresh_init_summary():
         ports = list_serial_ports()
+        _init_detected_ports[:] = ports[:]
         if ports:
             preview = " / ".join(ports[:3])
             suffix = " ..." if len(ports) > 3 else ""
@@ -935,7 +998,9 @@ def build_page() -> QWidget:
                 f"color:{C_GREEN}; font-size:{_pt(11)}px; background:transparent; font-weight:700;"
             )
             _init_ports_lbl.setText(f"当前检测到 {len(ports)} 个串口设备：{preview}{suffix}")
-            _init_hint_lbl.setText(f"推荐先从 {ports[0]} 打开初始化面板，检测当前是否仍处于首次启动配置。")
+            _init_hint_lbl.setText(f"推荐先从 {ports[0]} 进入串口终端，按回车唤醒并继续首次启动配置。")
+            init_terminal_btn.setEnabled(True)
+            init_open_btn.setEnabled(True)
         else:
             _init_status_lbl.setText("● 未发现串口")
             _init_status_lbl.setStyleSheet(
@@ -943,9 +1008,19 @@ def build_page() -> QWidget:
             )
             _init_ports_lbl.setText("当前未检测到 /dev/ttyACM* 或 /dev/ttyUSB* 设备。")
             _init_hint_lbl.setText("连接 Jetson 串口线并重新上电后，可在这里直接进入初始化面板。")
+            init_terminal_btn.setEnabled(False)
+            init_open_btn.setEnabled(True)
 
-    init_refresh_btn.clicked.connect(_refresh_init_summary)
-    init_open_btn.clicked.connect(lambda: open_jetson_init_dialog(parent=page))
+    init_terminal_btn.clicked.connect(
+        lambda: open_jetson_init_dialog(
+            parent=page,
+            preferred_port=_preferred_init_port(),
+            auto_open_terminal=True,
+        )
+    )
+    init_open_btn.clicked.connect(
+        lambda: open_jetson_init_dialog(parent=page, preferred_port=_preferred_init_port())
+    )
     init_net_btn.clicked.connect(lambda: open_jetson_net_config_dialog(parent=page))
     init_share_btn.clicked.connect(lambda: open_net_share_dialog(
         parent=page, jetson_ip=_ip_input.text().strip()))
@@ -1001,6 +1076,22 @@ def build_page() -> QWidget:
             "启动",
             "jupyter",
         ),
+        (
+            "🖥",
+            "远程桌面",
+            "通过 VNC/noVNC 查看和操控 Jetson 图形桌面",
+            "ℹ  需要先连接设备，Jetson 需有图形桌面环境",
+            "打开",
+            "remote_desktop",
+        ),
+        (
+            "🤖",
+            "AI Agent 安装",
+            "通过 SSH 在 Jetson 上安装 Claude Code / Codex / OpenClaw CLI",
+            "ℹ  需要先连接设备，自动安装 Node.js 和选中的 Agent 到 Jetson",
+            "安装",
+            "agent_install",
+        ),
     ]
 
     # API 测试线程持有
@@ -1039,7 +1130,7 @@ def build_page() -> QWidget:
                 dlg.exec_()
             elif tid == "vscode_web":
                 if not isinstance(runner, SSHRunner):
-                    QMessageBox.warning(page, "提示", "请先在「设备连接」中连接 Jetson 设备。")
+                    _show_need_connection_dialog(page, name)
                     return
                 dlg = _VscodeWebDialog(runner=runner, ip=runner.host, parent=page)
                 dlg.exec_()
@@ -1065,10 +1156,20 @@ def build_page() -> QWidget:
                 _api_test_thread[0] = t
             elif tid == "jupyter":
                 if not isinstance(runner, SSHRunner):
-                    QMessageBox.warning(page, "提示", "请先在「设备连接」中连接 Jetson 设备。")
+                    _show_need_connection_dialog(page, name)
                     return
                 dlg = _JupyterLaunchDialog(runner=runner, ip=runner.host, parent=page)
                 dlg.exec_()
+            elif tid == "remote_desktop":
+                if not isinstance(runner, SSHRunner):
+                    _show_need_connection_dialog(page, name)
+                    return
+                open_desktop_dialog(runner=runner, ip=runner.host, parent=page)
+            elif tid == "agent_install":
+                if not isinstance(runner, SSHRunner):
+                    _show_need_connection_dialog(page, name)
+                    return
+                open_agent_install_dialog(runner=runner, parent=page)
 
         act_btn.clicked.connect(_on_click)
         rl.addWidget(act_btn)

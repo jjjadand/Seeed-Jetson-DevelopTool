@@ -6,9 +6,10 @@ from PyQt5.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QScrollArea, QDialog, QTextEdit,
+    QComboBox, QLineEdit, QFormLayout, QDialogButtonBox, QSizePolicy,
 )
 
-from seeed_jetson_develop.core.runner import Runner, get_runner
+from seeed_jetson_develop.core.runner import Runner, SSHRunner, SerialRunner, get_runner
 from seeed_jetson_develop.core.events import bus
 from seeed_jetson_develop.gui.theme import (
     C_BG, C_BG_DEEP, C_CARD, C_CARD_LIGHT,
@@ -27,6 +28,82 @@ COLOR_MAP = {
     "error": C_RED,
     "info":  C_BLUE,
 }
+
+
+# ── 串口凭据弹窗 ──────────────────────────────────────────────────────────────
+class _SerialCredDialog(QDialog):
+    """当没有 SSH 连接时，弹窗让用户选择串口并输入登录凭据。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("串口连接 — 输入凭据")
+        self.setMinimumWidth(380)
+        self.setStyleSheet(f"background:{C_BG}; color:{C_TEXT};")
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(14)
+
+        lay.addWidget(_lbl("当前未建立 SSH 连接，将通过串口执行检测。", 12, C_TEXT2, wrap=True))
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        # 串口选择
+        self.port_combo = QComboBox()
+        self.port_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._refresh_ports()
+        refresh_btn = _btn("刷新", small=True)
+        refresh_btn.clicked.connect(self._refresh_ports)
+        port_row = QHBoxLayout()
+        port_row.addWidget(self.port_combo, 1)
+        port_row.addWidget(refresh_btn)
+        port_widget = QWidget()
+        port_widget.setLayout(port_row)
+        form.addRow(_lbl("串口设备", 12, C_TEXT2), port_widget)
+
+        # 用户名
+        self.user_edit = QLineEdit("seeed")
+        self.user_edit.setStyleSheet(f"background:{C_CARD_LIGHT}; color:{C_TEXT}; border:none; border-radius:6px; padding:6px 10px;")
+        form.addRow(_lbl("用户名", 12, C_TEXT2), self.user_edit)
+
+        # 密码
+        self.pass_edit = QLineEdit()
+        self.pass_edit.setEchoMode(QLineEdit.Password)
+        self.pass_edit.setPlaceholderText("输入 Jetson 登录密码")
+        self.pass_edit.setStyleSheet(f"background:{C_CARD_LIGHT}; color:{C_TEXT}; border:none; border-radius:6px; padding:6px 10px;")
+        form.addRow(_lbl("密码", 12, C_TEXT2), self.pass_edit)
+
+        lay.addLayout(form)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText("确定")
+        btns.button(QDialogButtonBox.Cancel).setText("取消")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def _refresh_ports(self):
+        try:
+            import serial.tools.list_ports
+            ports = sorted(p.device for p in serial.tools.list_ports.comports())
+        except Exception:
+            ports = []
+        current = self.port_combo.currentText()
+        self.port_combo.clear()
+        self.port_combo.addItems(ports or [""])
+        if current in ports:
+            self.port_combo.setCurrentText(current)
+
+    def get_runner(self) -> SerialRunner | None:
+        port = self.port_combo.currentText().strip()
+        user = self.user_edit.text().strip() or "seeed"
+        pwd  = self.pass_edit.text()
+        if not port:
+            return None
+        return SerialRunner(port=port, username=user, password=pwd)
+
+
 
 
 def _status_tag(text="待检测", color=C_TEXT3) -> QLabel:
@@ -50,9 +127,9 @@ class _DiagThread(QThread):
     info_ready = pyqtSignal(dict)          # 设备基本信息 dict
     finished_all = pyqtSignal()
 
-    def __init__(self, mode="full"):
+    def __init__(self, mode="full", runner: Runner = None):
         super().__init__()
-        self._runner = get_runner()
+        self._runner = runner if runner is not None else get_runner()
         self._mode = mode
 
     def run(self):
@@ -439,11 +516,28 @@ def build_page() -> QWidget:
         l4t = info.get("l4t", "R36")
         _l4t_ver[0] = l4t
 
-    def _start(mode="full"):
+    def _start(mode="full", silent_no_runner=False):
         if _thread[0] and _thread[0].isRunning():
             return
+
+        # 判断当前 runner 类型
+        current_runner = get_runner()
+        if not isinstance(current_runner, SSHRunner):
+            if silent_no_runner:
+                return
+            # 没有 SSH 连接，弹窗让用户选择串口
+            dlg = _SerialCredDialog(parent=page)
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            serial_runner = dlg.get_runner()
+            if serial_runner is None:
+                return
+            runner_to_use = serial_runner
+        else:
+            runner_to_use = current_runner
+
         _set_all_running()
-        t = _DiagThread(mode)
+        t = _DiagThread(mode, runner=runner_to_use)
         t.result.connect(_on_result)
         t.info_ready.connect(_on_info)
         t.finished_all.connect(_reset_buttons)
@@ -463,6 +557,6 @@ def build_page() -> QWidget:
     if _torch_install_btn[0]:
         _torch_install_btn[0].clicked.connect(_open_torch_install)
 
-    _start("info")
+    _start("info", silent_no_runner=True)
 
     return page

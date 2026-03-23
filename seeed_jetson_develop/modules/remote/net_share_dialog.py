@@ -16,7 +16,9 @@ from seeed_jetson_develop.gui.theme import (
 from seeed_jetson_develop.modules.remote.net_share import (
     detect_wan_interface, list_interfaces,
     enable_nat, disable_nat,
+    get_interface_ip, build_jetson_gateway_cmd,
 )
+from seeed_jetson_develop.core.runner import SSHRunner, get_runner
 
 
 class _NatThread(QThread):
@@ -38,10 +40,34 @@ class _NatThread(QThread):
         self.done.emit(ok, log)
 
 
+class _JetsonGatewayThread(QThread):
+    """后台通过 SSH 配置 Jetson 的网关和 DNS。"""
+    done = pyqtSignal(bool, str)  # ok, log
+
+    def __init__(self, runner: SSHRunner, gateway: str):
+        super().__init__()
+        self._runner = runner
+        self._gateway = gateway
+
+    def run(self):
+        cmd = build_jetson_gateway_cmd(self._runner.password, self._gateway)
+        rc, out = self._runner.run(cmd, timeout=15)
+        if rc == 0:
+            # 验证连通性
+            rc2, out2 = self._runner.run("ping -c 1 -W 3 8.8.8.8", timeout=10)
+            if rc2 == 0:
+                self.done.emit(True, f"{out}\n\n✅ Jetson 已可上网（ping 8.8.8.8 成功）")
+            else:
+                self.done.emit(True, f"{out}\n\n⚠ 网关已配置，但 ping 8.8.8.8 失败，请检查 PC 端 NAT 是否生效")
+        else:
+            self.done.emit(False, f"配置失败：{out}")
+
+
 class NetShareDialog(QDialog):
     def __init__(self, parent=None, jetson_ip: str = ""):
         super().__init__(parent)
         self._thread: _NatThread | None = None
+        self._jetson_thread: _JetsonGatewayThread | None = None
         self._sharing = False
         self._jetson_ip = jetson_ip
 
@@ -124,8 +150,8 @@ class NetShareDialog(QDialog):
 
         # 提示
         cl.addWidget(make_label(
-            "提示：开启后 Jetson 的网关需指向 PC 的 LAN 网卡 IP，DNS 设为 8.8.8.8。"
-            "可在'网络配置'对话框中通过串口完成。",
+            "提示：开启后会自动通过 SSH 配置 Jetson 的网关和 DNS，使 Jetson 可以上网。"
+            "如果未建立 SSH 连接，需手动在 Jetson 上配置网关指向 PC 的 LAN 网卡 IP。",
             10, C_TEXT3, wrap=True,
         ))
         root.addWidget(card)
@@ -255,9 +281,36 @@ class NetShareDialog(QDialog):
             self._status.setStyleSheet(
                 f"color:{C_GREEN}; font-size:{pt(12)}px; background:transparent; font-weight:700;")
             self._disable_btn.setEnabled(True)
+            # 自动配置 Jetson 网关和 DNS
+            self._configure_jetson_gateway()
         else:
             self._status.setText("开启失败，请查看日志")
             self._status.setStyleSheet(f"color:{C_RED}; font-size:{pt(12)}px; background:transparent;")
+
+    def _configure_jetson_gateway(self):
+        """PC NAT 开启后，自动通过 SSH 配置 Jetson 的网关和 DNS。"""
+        runner = get_runner()
+        if not isinstance(runner, SSHRunner):
+            self._log.append("\n⚠ 未建立 SSH 连接，无法自动配置 Jetson 网关。")
+            self._log.append("请手动在 Jetson 上执行：")
+            lan_ip = get_interface_ip(self._get_lan())
+            gw = lan_ip or "<PC LAN 网卡 IP>"
+            self._log.append(f"  sudo ip route replace default via {gw}")
+            self._log.append(f"  echo 'nameserver 8.8.8.8' | sudo tee /etc/resolv.conf")
+            return
+
+        lan_ip = get_interface_ip(self._get_lan())
+        if not lan_ip:
+            self._log.append(f"\n⚠ 无法获取 LAN 网卡 ({self._get_lan()}) 的 IP 地址，无法自动配置 Jetson。")
+            return
+
+        self._log.append(f"\n正在通过 SSH 配置 Jetson 网关 → {lan_ip}，DNS → 8.8.8.8 …")
+        self._jetson_thread = _JetsonGatewayThread(runner, lan_ip)
+        self._jetson_thread.done.connect(self._on_jetson_gw_done)
+        self._jetson_thread.start()
+
+    def _on_jetson_gw_done(self, ok: bool, log: str):
+        self._log.append("\n" + log)
 
     def _do_disable(self):
         wan, lan = self._get_wan(), self._get_lan()

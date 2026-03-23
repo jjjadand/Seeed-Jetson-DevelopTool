@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QFont, QFontDatabase
 from PyQt5.QtWidgets import (
     QApplication, QFrame, QGraphicsDropShadowEffect,
     QLabel, QPushButton, QWidget, QVBoxLayout,
@@ -40,12 +40,63 @@ C_TEXT      = "#F0F4F8"   # 主文字
 C_TEXT2     = "#94A3B0"   # 次级文字
 C_TEXT3     = "#5A6B7A"   # 辅助文字
 
+UI_FONT_CANDIDATES = (
+    "Noto Sans CJK SC",
+    "Noto Sans SC",
+    "Source Han Sans SC",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "WenQuanYi Micro Hei",
+    "SimHei",
+    "Arial Unicode MS",
+)
+
+MONO_FONT_CANDIDATES = (
+    "Sarasa Mono SC",
+    "Sarasa Term SC",
+    "Noto Sans Mono CJK SC",
+    "Source Han Mono SC",
+    "WenQuanYi Zen Hei Mono",
+    "Cascadia Mono",
+    "Cascadia Code",
+    "JetBrains Mono",
+    "Consolas",
+    "DejaVu Sans Mono",
+)
+
 # ── DPI-aware 字体缩放 ────────────────────────────────────────────────────────
 def pt(px: int) -> int:
     """返回字体大小（px），stylesheet 中用 px 单位更可靠。
     保留函数名兼容现有调用，但直接返回 px 值（最小 10）。
     """
     return max(10, px)
+
+
+def pick_font_family(candidates: tuple[str, ...], fallback: str = "Sans Serif") -> str:
+    families = set(QFontDatabase().families())
+    for family in candidates:
+        if family in families:
+            return family
+    return fallback
+
+
+def build_app_font(point_size: int | None = None) -> QFont:
+    font = QFont(pick_font_family(UI_FONT_CANDIDATES))
+    if point_size is not None:
+        font.setPointSize(point_size)
+    return font
+
+
+def build_mono_font(point_size: int | None = None) -> QFont:
+    fallback = pick_font_family(UI_FONT_CANDIDATES)
+    font = QFont(pick_font_family(MONO_FONT_CANDIDATES, fallback=fallback))
+    font.setStyleHint(QFont.TypeWriter)
+    font.setFixedPitch(True)
+    if point_size is not None:
+        font.setPointSize(point_size)
+    return font
 
 
 # ── 通用组件工厂 ──────────────────────────────────────────────────────────────
@@ -352,3 +403,6 @@ def apply_app_theme():
     app = QApplication.instance()
     if app:
         app.setStyleSheet(APP_QSS)
+        current_font = app.font()
+        base_size = current_font.pointSize() if current_font.pointSize() > 0 else 11
+        app.setFont(build_app_font(base_size))

@@ -207,3 +207,41 @@ def configure_jetson_dns_via_serial(
         f" && nmcli con up $(nmcli -t -f NAME con show --active | head -1)"
     )
     return f"echo '{pwd_escaped}' | sudo -S bash -c '{inner}'"
+
+
+def get_interface_ip(iface_name: str) -> str | None:
+    """获取指定网卡的 IPv4 地址。"""
+    if sys.platform == "win32":
+        try:
+            r = subprocess.run(
+                ["powershell", "-Command",
+                 f"(Get-NetIPAddress -InterfaceAlias '{iface_name}' "
+                 f"-AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return r.stdout.strip() or None
+        except Exception:
+            return None
+    try:
+        r = subprocess.run(
+            ["ip", "-4", "-br", "addr", "show", iface_name],
+            capture_output=True, text=True, timeout=10,
+        )
+        for part in r.stdout.split():
+            if "/" in part and not part.startswith("fe80"):
+                return part.split("/")[0]
+    except Exception:
+        pass
+    return None
+
+
+def build_jetson_gateway_cmd(
+    sudo_password: str, gateway: str, dns: str = "8.8.8.8",
+) -> str:
+    """生成在 Jetson 上通过 SSH 配置默认网关和 DNS 的命令。"""
+    pwd_escaped = sudo_password.replace("'", "'\\''")
+    return (
+        f"echo '{pwd_escaped}' | sudo -S ip route replace default via {gateway} && "
+        f"echo 'nameserver {dns}' | sudo -S tee /etc/resolv.conf > /dev/null && "
+        f"echo 'gateway={gateway} dns={dns} configured'"
+    )

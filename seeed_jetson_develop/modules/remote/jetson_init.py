@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 import signal
 import shlex
@@ -17,8 +18,10 @@ import serial.tools.list_ports
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QSizePolicy, QTextEdit, QVBoxLayout,
+    QMessageBox, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
+
+from seeed_jetson_develop.modules.remote.native_terminal import NativeTerminalWidget
 
 from seeed_jetson_develop.gui.theme import (
     C_BG, C_CARD_LIGHT, C_GREEN, C_ORANGE, C_RED,
@@ -304,6 +307,74 @@ class _ProbeThread(QThread):
         self.finished_probe.emit(probe_serial_status(self._port))
 
 
+class _EmbeddedSerialThread(QThread):
+    opened = pyqtSignal()
+    closed = pyqtSignal()
+    output = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, port: str, baudrate: int = 115200):
+        super().__init__()
+        self._port = port
+        self._baudrate = baudrate
+        self._stop = False
+        self._tx_queue: "queue.Queue[bytes]" = queue.Queue()
+        self._ser: serial.Serial | None = None
+
+    def send(self, data: bytes):
+        if data:
+            self._tx_queue.put(data)
+
+    def stop(self):
+        self._stop = True
+        self._tx_queue.put(b"")
+
+    def run(self):
+        try:
+            self._ser = serial.Serial(
+                self._port,
+                baudrate=self._baudrate,
+                timeout=0.1,
+                write_timeout=0.5,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+            )
+            self.opened.emit()
+        except Exception as exc:
+            self.error.emit(str(exc))
+            self.closed.emit()
+            return
+
+        try:
+            while not self._stop:
+                try:
+                    while True:
+                        payload = self._tx_queue.get_nowait()
+                        if payload:
+                            self._ser.write(payload)
+                            self._ser.flush()
+                except queue.Empty:
+                    pass
+
+                if self._ser.in_waiting:
+                    chunk = self._ser.read(self._ser.in_waiting)
+                    if chunk:
+                        self.output.emit(chunk.decode("utf-8", errors="replace"))
+                        continue
+
+                time.sleep(0.03)
+        except Exception as exc:
+            if not self._stop:
+                self.error.emit(str(exc))
+        finally:
+            try:
+                if self._ser and self._ser.is_open:
+                    self._ser.close()
+            finally:
+                self.closed.emit()
+
+
 # ── 串口命令执行线程（pyserial，跨平台）──────────────────────────────────────
 
 class _SerialCmdThread(QThread):
@@ -388,12 +459,14 @@ class _SerialCmdThread(QThread):
 # ── Jetson 初始化对话框 ───────────────────────────────────────────────────────
 
 class JetsonInitDialog(QDialog):
-    def __init__(self, parent=None, preferred_port: str = ""):
+    def __init__(self, parent=None, preferred_port: str = "", auto_open_terminal: bool = False):
         super().__init__(parent)
         self._probe_thread: _ProbeThread | None = None
+        self._serial_thread: _EmbeddedSerialThread | None = None
         self._lock_info: dict | None = None
+        self._auto_open_terminal_pending = auto_open_terminal
         self.setWindowTitle("Jetson 初始化")
-        self.setMinimumSize(720, 560)
+        self.setMinimumSize(980, 680)
         self.setSizeGripEnabled(True)
         self.setStyleSheet(f"background:{C_BG}; color:{C_TEXT};")
 
@@ -403,9 +476,24 @@ class JetsonInitDialog(QDialog):
 
         root.addWidget(make_label("Jetson 初始化", 16, C_TEXT, bold=True))
         root.addWidget(make_label(
-            "烧录完成后，通过串口终端进入首次启动配置。选择串口后点击'打开串口终端'即可开始。",
+            "烧录完成后，通过串口终端进入首次启动配置。选择串口后点击'连接串口终端'即可开始。",
             11, C_TEXT2, wrap=True,
         ))
+
+        content_row = QHBoxLayout()
+        content_row.setSpacing(16)
+
+        left_col = QWidget()
+        left_col.setStyleSheet("background:transparent;")
+        left_lay = QVBoxLayout(left_col)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(16)
+
+        right_col = QWidget()
+        right_col.setStyleSheet("background:transparent;")
+        right_lay = QVBoxLayout(right_col)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(16)
 
         top_card = make_card(12)
         apply_shadow(top_card, blur=18, y=4, alpha=60)
@@ -413,20 +501,30 @@ class JetsonInitDialog(QDialog):
         top_lay.setContentsMargins(18, 16, 18, 16)
         top_lay.setSpacing(12)
 
+        port_label_row = QHBoxLayout()
+        port_label_row.setSpacing(10)
+        port_label_row.addWidget(make_label("串口设备", 12, C_TEXT2))
+        port_label_row.addStretch()
+        top_lay.addLayout(port_label_row)
+
         port_row = QHBoxLayout()
         port_row.setSpacing(10)
-        port_row.addWidget(make_label("串口设备", 12, C_TEXT2))
         self.port_combo = QComboBox()
-        self.port_combo.setMinimumWidth(220)
-        port_row.addWidget(self.port_combo)
+        self.port_combo.setMinimumWidth(260)
+        self.port_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        port_row.addWidget(self.port_combo, 1)
+        top_lay.addLayout(port_row)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(10)
         self.refresh_btn  = make_button("刷新串口", small=True)
         self.detect_btn   = make_button("检测初始化状态", small=True)
-        self.open_btn     = make_button("打开串口终端", primary=True, small=True)
-        port_row.addWidget(self.refresh_btn)
-        port_row.addWidget(self.detect_btn)
-        port_row.addWidget(self.open_btn)
-        port_row.addStretch()
-        top_lay.addLayout(port_row)
+        self.open_btn     = make_button("连接串口终端", primary=True, small=True)
+        action_row.addWidget(self.refresh_btn)
+        action_row.addWidget(self.detect_btn)
+        action_row.addWidget(self.open_btn)
+        action_row.addStretch()
+        top_lay.addLayout(action_row)
 
         self.cmd_preview = make_label("", 10, C_TEXT3, wrap=True)
         top_lay.addWidget(self.cmd_preview)
@@ -452,28 +550,71 @@ class JetsonInitDialog(QDialog):
         lock_row.addWidget(self.lock_hint, 1)
         lock_row.addWidget(self.release_lock_btn)
         top_lay.addLayout(lock_row)
-        root.addWidget(top_card)
+        left_lay.addWidget(top_card)
 
-        excerpt_card = make_card(12)
-        excerpt_lay = QVBoxLayout(excerpt_card)
-        excerpt_lay.setContentsMargins(18, 16, 18, 16)
-        excerpt_lay.setSpacing(10)
-        excerpt_lay.addWidget(make_label("状态摘录", 12, C_TEXT, bold=True))
-        self.output_box = QTextEdit()
-        self.output_box.setReadOnly(True)
-        self.output_box.setMinimumHeight(100)
-        self.output_box.setLineWrapMode(QTextEdit.WidgetWidth)
-        self.output_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.output_box.setStyleSheet(f"""
-            QTextEdit {{
+        # ── 内嵌串口终端 ──
+        terminal_card = make_card(12)
+        terminal_lay = QVBoxLayout(terminal_card)
+        terminal_lay.setContentsMargins(18, 16, 18, 16)
+        terminal_lay.setSpacing(10)
+
+        terminal_title_row = QHBoxLayout()
+        terminal_title_row.addWidget(make_label("内嵌串口终端", 12, C_TEXT, bold=True))
+        terminal_title_row.addStretch()
+        self.terminal_status = make_label("未连接", 10, C_TEXT3)
+        terminal_title_row.addWidget(self.terminal_status)
+        terminal_lay.addLayout(terminal_title_row)
+
+        self.terminal_view = NativeTerminalWidget()
+        self.terminal_view.setMinimumHeight(260)
+        self.terminal_view.setStyleSheet(f"""
+            QPlainTextEdit {{
                 background:{C_CARD_LIGHT}; border:none; border-radius:10px;
-                color:{C_TEXT2}; padding:12px;
-                font-size:{pt(10)}pt; font-family:'JetBrains Mono','Consolas',monospace;
+                color:{C_TEXT}; padding:12px;
+                font-size:{pt(10)}pt; font-family:'Consolas','JetBrains Mono',monospace;
+            }}
+            QScrollBar:vertical {{
+                background:transparent; width:10px; margin:6px 2px 6px 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background:#4b5563; border-radius:5px; min-height:24px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background:#64748b; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height:0px; background:transparent;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background:transparent;
+            }}
+            QScrollBar:horizontal {{
+                background:transparent; height:10px; margin:0 6px 2px 6px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background:#4b5563; border-radius:5px; min-width:24px;
+            }}
+            QScrollBar::handle:horizontal:hover {{ background:#64748b; }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                width:0px; background:transparent;
+            }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background:transparent;
             }}
         """)
-        self.output_box.setPlaceholderText("检测初始化状态后，这里会显示关键状态摘录。")
-        excerpt_lay.addWidget(self.output_box)
-        root.addWidget(excerpt_card, 1)
+        terminal_lay.addWidget(self.terminal_view, 1)
+
+        terminal_btn_row = QHBoxLayout()
+        terminal_btn_row.setSpacing(10)
+        self.disconnect_btn = make_button("断开", small=True)
+        self.disconnect_btn.setEnabled(False)
+        self.clear_terminal_btn = make_button("清屏", small=True)
+        self.send_enter_btn = make_button("发送回车", small=True)
+        terminal_btn_row.addWidget(self.disconnect_btn)
+        terminal_btn_row.addWidget(self.clear_terminal_btn)
+        terminal_btn_row.addWidget(self.send_enter_btn)
+        terminal_btn_row.addStretch()
+        terminal_lay.addLayout(terminal_btn_row)
+
+        right_lay.addWidget(terminal_card, 1)
 
         guide_card = make_card(12)
         guide_lay = QVBoxLayout(guide_card)
@@ -482,12 +623,17 @@ class JetsonInitDialog(QDialog):
         guide_lay.addWidget(make_label("使用说明", 12, C_TEXT, bold=True))
         for idx, text in enumerate([
             "确认 Jetson 已上电，并通过 USB 线连接到主机。",
-            "选择串口设备，点击'打开串口终端'，在弹出的终端窗口中完成初始化配置。",
+            "选择串口设备，点击'连接串口终端'，在右侧终端中完成初始化配置。",
             "按照向导完成 License 确认、用户名、密码、时区、网络等设置。",
             "看到 login: 提示后说明初始化完成，可关闭此窗口。",
         ], 1):
             guide_lay.addWidget(make_label(f"{idx}. {text}", 11, C_TEXT2, wrap=True))
-        root.addWidget(guide_card)
+        left_lay.addWidget(guide_card)
+        left_lay.addStretch()
+
+        content_row.addWidget(left_col, 4)
+        content_row.addWidget(right_col, 6)
+        root.addLayout(content_row, 1)
 
         close_row = QHBoxLayout()
         close_row.addStretch()
@@ -499,8 +645,14 @@ class JetsonInitDialog(QDialog):
         self.refresh_btn.clicked.connect(self.refresh_ports)
         self.detect_btn.clicked.connect(self.detect_status)
         self.open_btn.clicked.connect(self.open_terminal)
+        self.disconnect_btn.clicked.connect(self.close_terminal)
+        self.clear_terminal_btn.clicked.connect(self._clear_terminal_surface)
+        self.send_enter_btn.clicked.connect(lambda: self._send_terminal_bytes(b"\r"))
+        self.terminal_view.input_bytes.connect(self._send_terminal_bytes)
         self.port_combo.currentTextChanged.connect(self._on_port_changed)
         self.refresh_ports(preferred_port)
+        if self._auto_open_terminal_pending and self._current_port():
+            QTimer.singleShot(0, self._open_terminal_from_entry)
 
     def refresh_ports(self, preferred_port: str = ""):
         ports = list_serial_ports()
@@ -524,17 +676,23 @@ class JetsonInitDialog(QDialog):
     def _update_ui(self, port: str):
         commands = _external_serial_commands(port) if port else []
         if port and commands:
-            self.cmd_preview.setText(f"将执行：{commands[0]}")
+            self.cmd_preview.setText(f"外部终端备选：{commands[0]}")
         elif port:
-            self.cmd_preview.setText("未检测到可用的外部终端工具。")
+            self.cmd_preview.setText("未检测到可用的外部终端工具（可使用内嵌终端）。")
         else:
             self.cmd_preview.setText("等待检测到可用串口设备")
         has_port = bool(port)
-        self.open_btn.setEnabled(has_port)
+        self.open_btn.setEnabled(has_port and self._serial_thread is None)
+        self.disconnect_btn.setEnabled(self._serial_thread is not None)
         self.detect_btn.setEnabled(has_port)
 
     def _on_port_changed(self, port: str):
         self._update_ui(port)
+
+    def _open_terminal_from_entry(self):
+        if self._serial_thread is None and self._current_port():
+            self.open_terminal()
+        self._auto_open_terminal_pending = False
 
     def _set_state(self, level: str, badge: str, detail: str):
         color = {"ok": C_GREEN, "warn": C_ORANGE, "error": C_RED}.get(level, C_TEXT2)
@@ -586,7 +744,6 @@ class JetsonInitDialog(QDialog):
         self.detect_btn.setEnabled(False)
         self.detect_btn.setText("检测中…")
         self._set_state("info", "检测中", f"正在读取 {port} 的串口输出…")
-        self.output_box.clear()
         self._probe_thread = _ProbeThread(port)
         self._probe_thread.finished_probe.connect(self._on_probe_result)
         self._probe_thread.start()
@@ -607,25 +764,97 @@ class JetsonInitDialog(QDialog):
         else:
             self._set_state("info", "状态未知", result.get("detail", ""))
             self._set_lock_info(None)
-        excerpt = result.get("excerpt", "").strip()
-        self.output_box.setPlainText(excerpt or result.get("detail", ""))
+
+    def _focus_terminal_surface(self):
+        if self.terminal_view is not None:
+            self.terminal_view.focus_terminal()
+
+    def _clear_terminal_surface(self):
+        if self.terminal_view is not None:
+            self.terminal_view.clear_terminal()
+
+    def _append_terminal_surface(self, text: str):
+        if self.terminal_view is None or not text:
+            return
+        self.terminal_view.feed(text)
 
     def open_terminal(self):
         port = self._current_port()
         if not port:
             QMessageBox.warning(self, "提示", "请先选择串口。")
             return
-        ok, info = launch_serial_terminal(port)
-        if ok:
-            QMessageBox.information(self, "已打开串口终端",
-                f"已在外部终端中打开：\n{info}\n\n请在终端窗口中完成 Jetson 初始化配置。使用结束后请完全退出该终端程序，否则串口会继续被占用。")
-        else:
-            QMessageBox.warning(self, "无法打开外部终端",
-                f"{info}\n\n请手动在终端中执行上方显示的命令。")
+        if self._serial_thread is not None:
+            self._focus_terminal_surface()
+            return
+
+        self._set_lock_info(None)
+        self._append_terminal_surface(f"\n[connecting] {port} @ 115200\n")
+
+        thread = _EmbeddedSerialThread(port)
+        thread.opened.connect(self._on_terminal_opened)
+        thread.output.connect(self._append_terminal_output)
+        thread.error.connect(self._on_terminal_error)
+        thread.closed.connect(self._on_terminal_closed)
+        self._serial_thread = thread
+        self.terminal_status.setText("连接中")
+        self.terminal_status.setStyleSheet(
+            f"color:{C_ORANGE}; font-size:{pt(10)}pt; background:transparent; font-weight:700;"
+        )
+        self._update_ui(port)
+        thread.start()
+
+    def close_terminal(self):
+        if self._serial_thread:
+            self._serial_thread.stop()
+
+    def _send_terminal_bytes(self, payload: bytes):
+        if self._serial_thread:
+            self._serial_thread.send(payload)
+            self._focus_terminal_surface()
+
+    def _on_terminal_opened(self):
+        self.terminal_status.setText("已连接")
+        self.terminal_status.setStyleSheet(
+            f"color:{C_GREEN}; font-size:{pt(10)}pt; background:transparent; font-weight:700;"
+        )
+        self._update_ui(self._current_port())
+        self._focus_terminal_surface()
+        self._send_terminal_bytes(b"\r")
+
+    def _append_terminal_output(self, text: str):
+        self._append_terminal_surface(text)
+
+    def _on_terminal_error(self, err: str):
+        self._append_terminal_surface(f"\n[error] {err}\n")
+        self._set_lock_info(inspect_serial_port_lock(self._current_port(), err))
+        self.terminal_status.setText("连接失败")
+        self.terminal_status.setStyleSheet(
+            f"color:{C_RED}; font-size:{pt(10)}pt; background:transparent; font-weight:700;"
+        )
+
+    def _on_terminal_closed(self):
+        self._serial_thread = None
+        if self.terminal_status.text() != "连接失败":
+            self.terminal_status.setText("未连接")
+            self.terminal_status.setStyleSheet(
+                f"color:{C_TEXT3}; font-size:{pt(10)}pt; background:transparent;"
+            )
+        self._update_ui(self._current_port())
+
+    def closeEvent(self, event):
+        self.close_terminal()
+        if self._serial_thread and not self._serial_thread.wait(1200):
+            self._serial_thread.terminate()
+            self._serial_thread.wait(500)
+        super().closeEvent(event)
 
 
-def open_jetson_init_dialog(parent=None, preferred_port: str = ""):
-    dlg = JetsonInitDialog(parent=parent, preferred_port=preferred_port)
+def open_jetson_init_dialog(parent=None, preferred_port: str = "", auto_open_terminal: bool = False):
+    dlg = JetsonInitDialog(
+        parent=parent,
+        preferred_port=preferred_port,
+        auto_open_terminal=auto_open_terminal,
+    )
     dlg.exec_()
 
 

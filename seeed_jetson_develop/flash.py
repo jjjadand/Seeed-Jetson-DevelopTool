@@ -215,50 +215,15 @@ class JetsonFlasher:
 
     def firmware_extracted(self) -> bool:
         """检查当前产品的固件是否已解压。
-        匹配优先级：精确匹配 > foldername 前缀匹配 > 产品系列关键词匹配。
+        只做精确匹配：foldername 就是解压后的实际目录名。
+        不做前缀/关键词兜底，避免跨产品误判（如 classic 的 mfi_recomputer-orin
+        误匹配 super 的 mfi_recomputer-orin-super-j401）。
         """
         extract_dir = self.download_dir / "extracted"
-        if not extract_dir.exists():
-            return False
-        try:
-            subdirs = [d for d in extract_dir.iterdir() if d.is_dir()]
-        except Exception:
-            return False
-        if not subdirs:
-            return False
-
         foldername = self.firmware_info.get('foldername', '')
-        if foldername:
-            # 精确匹配
-            if (extract_dir / foldername).is_dir():
-                return True
-            # 前缀匹配
-            if any(d.name.startswith(foldername) for d in subdirs):
-                return True
-
-        # 产品系列关键词兜底：从 filename 提取系列特征词，避免跨产品误判
-        # 例如 reserver 包的目录含 "reserver"，classic 包含 "recomputer-orin" 但不含 "reserver"
-        filename = self.firmware_info.get('filename', '')
-        series_keywords = []
-        if 'reserver' in filename:
-            series_keywords = ['reserver']
-        elif 'recomputer-super' in filename or 'super' in filename:
-            series_keywords = ['recomputer-super', 'recomputer-orin-super']
-        elif 'recomputer-robo' in filename or 'robo' in filename:
-            series_keywords = ['recomputer-robo']
-        elif 'recomputer-industrial' in filename or 'industrial' in filename:
-            series_keywords = ['recomputer-industrial']
-        elif 'recomputer-mini' in filename or 'mini' in filename:
-            series_keywords = ['recomputer-orin-j40mini', 'recomputer-orin-j30mini']
-        elif 'recomputer' in filename:
-            series_keywords = ['recomputer-orin']
-
-        if series_keywords:
-            for d in subdirs:
-                if any(kw in d.name for kw in series_keywords):
-                    return True
-
-        return False
+        if not foldername or not extract_dir.exists():
+            return False
+        return (extract_dir / foldername).is_dir()
 
     def clear_cache(self, clear_archive=True, clear_extracted=True):
         """清除本地缓存。返回 (删了哪些路径) 列表。"""
@@ -349,19 +314,18 @@ class JetsonFlasher:
             return False
     
     def _detect_extracted_dir(self, extract_dir: Path) -> Path | None:
-        """探测解压后的实际顶层目录，优先匹配 foldername，否则取唯一子目录。"""
+        """探测解压后的实际顶层目录，优先精确匹配 foldername，否则取唯一子目录。"""
         foldername = self.firmware_info.get('foldername', '')
-        # 优先：精确匹配
-        candidate = extract_dir / foldername
-        if candidate.is_dir():
-            return candidate
-        # 次选：前缀匹配（foldername 可能只是前缀）
+        # 优先：精确匹配（foldername 就是解压后的目录名）
         if foldername:
-            matches = [d for d in extract_dir.iterdir() if d.is_dir() and d.name.startswith(foldername)]
-            if len(matches) == 1:
-                return matches[0]
-        # 兜底：唯一子目录
-        subdirs = [d for d in extract_dir.iterdir() if d.is_dir()]
+            candidate = extract_dir / foldername
+            if candidate.is_dir():
+                return candidate
+        # 兜底：唯一子目录（用于 foldername 为空或目录名有细微差异的情况）
+        try:
+            subdirs = [d for d in extract_dir.iterdir() if d.is_dir()]
+        except Exception:
+            return None
         if len(subdirs) == 1:
             return subdirs[0]
         return None

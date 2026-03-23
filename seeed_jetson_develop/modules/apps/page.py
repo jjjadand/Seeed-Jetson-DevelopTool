@@ -10,6 +10,20 @@ from PyQt5.QtWidgets import (
 
 from seeed_jetson_develop.core.runner import Runner, SSHRunner, get_runner
 from seeed_jetson_develop.core.events import bus
+from seeed_jetson_develop.core.platform_detect import is_jetson
+
+
+def _can_execute_from_current_env(parent: QWidget) -> bool:
+    if is_jetson() or isinstance(get_runner(), SSHRunner):
+        return True
+    QMessageBox.information(
+        parent,
+        "需要远程连接",
+        "当前运行在 PC 上，安装或部署前必须先在「远程开发」页连接 Jetson 设备。",
+    )
+    return False
+
+
 from seeed_jetson_develop.modules.apps.registry import load_apps
 from seeed_jetson_develop.gui.theme import (
     C_BG, C_BG_DEEP, C_CARD, C_CARD_LIGHT,
@@ -364,6 +378,8 @@ def build_page() -> QWidget:
             app = next((a for a in apps_data if a["id"] == app_id), None)
             if not app:
                 return
+            if not _can_execute_from_current_env(page):
+                return
             cmds = _get_cmds(app)
             if not cmds:
                 QMessageBox.information(
@@ -384,6 +400,8 @@ def build_page() -> QWidget:
         try:
             app = next((a for a in apps_data if a["id"] == app_id), None)
             if not app:
+                return
+            if not _can_execute_from_current_env(page):
                 return
             cmds = app.get("uninstall_cmds") or []
             if not cmds:

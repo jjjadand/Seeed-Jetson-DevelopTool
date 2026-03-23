@@ -8,10 +8,10 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QPoint, QEvent, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QColor, QPixmap, QFont, QPainter
+from PyQt5.QtGui import QColor, QPixmap, QPainter
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame,
-    QVBoxLayout, QHBoxLayout, QGridLayout,
+    QVBoxLayout, QHBoxLayout, QGridLayout, QBoxLayout,
     QLabel, QPushButton, QComboBox, QCheckBox,
     QProgressBar, QTextEdit, QScrollArea, QDialog, QFileDialog,
     QStackedWidget, QSizePolicy,
@@ -23,13 +23,14 @@ from .theme import (
     C_GREEN, C_GREEN2, C_BLUE, C_ORANGE, C_RED,
     C_TEXT, C_TEXT2, C_TEXT3,
     pt, make_label, make_button, make_card, make_input_card,
-    make_section_header, apply_shadow, apply_app_theme
+    make_section_header, apply_shadow, apply_app_theme, build_app_font
 )
 from ..flash import JetsonFlasher, sudo_authenticate, sudo_check_cached
 from ..core.platform_detect import is_jetson
 from ..core.events import bus
 from ..modules.remote.jetson_init import open_jetson_init_dialog
 from .flash_animation import FlashAnimationWidget
+from .ai_chat import FloatingAIAssistant, build_ai_system_prompt
 
 
 # ─────────────────────────────────────────────
@@ -245,10 +246,11 @@ def make_btn(text, primary=False, danger=False, small=False):
 #  Flash 线程
 # ─────────────────────────────────────────────
 class FlashThread(QThread):
-    progress_msg = pyqtSignal(str)
-    progress_val = pyqtSignal(int)
-    progress_log = pyqtSignal(str)   # 实时日志行
-    finished = pyqtSignal(bool, str)
+    progress_msg      = pyqtSignal(str)
+    progress_val      = pyqtSignal(int)
+    progress_log      = pyqtSignal(str)          # 实时日志行
+    download_progress = pyqtSignal(int, int)     # (downloaded_bytes, total_bytes)  total=0 表示未知
+    finished          = pyqtSignal(bool, str)
 
     def __init__(self, product, l4t, skip_verify=False, download_only=False,
                  force_redownload=False, prepare_only=False, flash_only=False):
@@ -311,9 +313,12 @@ class FlashThread(QThread):
             self.finished.emit(False, str(e))
 
     def _on_dl(self, stage, cur, total):
-        if stage == "download" and total:
-            pct = int(5 + (cur / total) * 45)
-            self.progress_val.emit(pct)
+        if stage == "download":
+            # 无论 total 是否已知，都发出真实字节进度
+            self.download_progress.emit(int(cur), int(total))
+            if total:
+                pct = int(5 + (cur / total) * 45)
+                self.progress_val.emit(pct)
         elif stage == "log":
             self.progress_log.emit(cur)  # cur 此时是日志字符串
 
@@ -476,6 +481,11 @@ class MainWindowV2(QMainWindow):
         root_layout.addWidget(body, 1)
 
         self._set_page(0)
+        self._floating_ai = FloatingAIAssistant(self, system_prompt=build_ai_system_prompt())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_flash_adaptive_layout()
 
     # ── 标题栏 - 无下边框 ───────────────────────
     def _build_titlebar(self):
@@ -696,15 +706,6 @@ class MainWindowV2(QMainWindow):
         return sidebar
 
     def _set_page(self, idx):
-        # 应用市场(2)、Skills(3) 需要设备连接；设备管理(1)可通过串口等本地方式访问，不限制
-        if idx in (2, 3) and not self._is_jetson and not self._remote_connected:
-            from PyQt5.QtWidgets import QMessageBox
-            QMessageBox.information(
-                self, "需要先连接设备",
-                "当前运行在 PC 上，请先在「远程开发」页建立 SSH 连接，再使用此功能。"
-            )
-            idx = 4
-
         self._current_page = idx
         self.stack.setCurrentIndex(idx)
         for i, btn in enumerate(self._nav_btns):
@@ -840,8 +841,8 @@ class MainWindowV2(QMainWindow):
         inner_lay.addWidget(wizard_card)
 
         # ── 两列布局 ──
-        cols = QHBoxLayout()
-        cols.setSpacing(pt(24))
+        self.flash_cols = QBoxLayout(QBoxLayout.LeftToRight)
+        self.flash_cols.setSpacing(pt(24))
 
         # 左列 QStackedWidget（步骤一：设备选择 / 步骤二：Recovery 指南）
         self.flash_left_stack = QStackedWidget()
@@ -914,6 +915,23 @@ class MainWindowV2(QMainWindow):
             line-height: 1.6;
         """)
         dev_lay.addWidget(self.flash_info)
+
+        flash_docs_row = QHBoxLayout()
+        flash_docs_row.setSpacing(pt(10))
+
+        self.flash_getting_started_btn = make_button("Getting Started", primary=True, small=True)
+        self.flash_getting_started_btn.clicked.connect(
+            lambda: self._open_flash_doc(self.flash_getting_started_btn)
+        )
+        flash_docs_row.addWidget(self.flash_getting_started_btn)
+
+        self.flash_hardware_btn = make_button("Hardware Interface", small=True)
+        self.flash_hardware_btn.clicked.connect(
+            lambda: self._open_flash_doc(self.flash_hardware_btn)
+        )
+        flash_docs_row.addWidget(self.flash_hardware_btn)
+        flash_docs_row.addStretch()
+        dev_lay.addLayout(flash_docs_row)
         left_col.addWidget(dev_card)
 
         # 选项卡片
@@ -1042,10 +1060,13 @@ class MainWindowV2(QMainWindow):
         guide_outer.addWidget(guide_scroll, 1)
         self.flash_left_stack.addWidget(guide_card)
 
-        cols.addWidget(self.flash_left_stack, 1)
+        self.flash_cols.addWidget(self.flash_left_stack, 1)
 
         # 右列
-        right_col = QVBoxLayout()
+        self.flash_right_panel = QWidget()
+        self.flash_right_panel.setStyleSheet("background:transparent;")
+        self.flash_right_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        right_col = QVBoxLayout(self.flash_right_panel)
         right_col.setSpacing(pt(20))
 
         # 步骤内容区（QStackedWidget 切换步骤一/步骤二）
@@ -1287,15 +1308,39 @@ class MainWindowV2(QMainWindow):
         log_lay.addWidget(self.flash_log)
         right_col.addWidget(log_card, 1)
 
-        cols.addLayout(right_col, 1)
-        inner_lay.addLayout(cols)
+        self.flash_cols.addWidget(self.flash_right_panel, 1)
+        self.flash_cols.setStretch(0, 1)
+        self.flash_cols.setStretch(1, 1)
+        self.flash_cols_host = QWidget()
+        self.flash_cols_host.setStyleSheet("background:transparent;")
+        self.flash_cols_host.setLayout(self.flash_cols)
+        inner_lay.addWidget(self.flash_cols_host)
         inner_lay.addStretch()
 
         scroll.setWidget(inner)
         lay.addWidget(scroll, 1)
 
         self._on_flash_product_changed(self.flash_product_combo.currentText())
+        QTimer.singleShot(0, self._update_flash_adaptive_layout)
         return page
+
+    def _update_flash_adaptive_layout(self):
+        if not hasattr(self, "flash_cols") or not hasattr(self, "flash_cols_host"):
+            return
+
+        width = self.flash_cols_host.width() or self.stack.width() or self.width()
+        compact = width < 1180
+        direction = QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        self.flash_cols.setDirection(direction)
+
+        if hasattr(self, "flash_device_img"):
+            if compact:
+                self.flash_device_img.setFixedSize(280, 176)
+            else:
+                self.flash_device_img.setFixedSize(320, 200)
+
+        if hasattr(self, "flash_log"):
+            self.flash_log.setMinimumHeight(160 if compact else 200)
 
     def _on_flash_product_changed(self, product):
         self.flash_l4t_combo.clear()
@@ -1303,18 +1348,23 @@ class MainWindowV2(QMainWindow):
             self.flash_l4t_combo.addItems(self.products[product])
         info = self.product_images.get(product, {})
         name = info.get("name", product)
-        wiki = info.get("wiki", "—")
         versions = len(self.products.get(product, []))
-        wiki_html = "—"
-        if wiki and wiki != "—":
-            wiki_html = (
-                f'<a href="{wiki}" style="color:{C_BLUE}; text-decoration:underline;">'
-                f"{wiki}</a>"
-            )
+        getting_started = info.get("getting_started", "").strip()
+        hardware_interfaces = info.get("hardware_interfaces", "").strip()
         self.flash_info.setText(
             f"型号：{name}<br>"
             f"可用版本：{versions} 个<br>"
-            f"Wiki：{wiki_html}"
+            "文档快捷入口：使用下方按钮打开"
+        )
+        self._set_flash_doc_button(
+            self.flash_getting_started_btn,
+            getting_started,
+            "打开该产品的 Getting Started Wiki",
+        )
+        self._set_flash_doc_button(
+            self.flash_hardware_btn,
+            hardware_interfaces,
+            "打开该产品的 Hardware Interface Wiki",
         )
 
         # 加载设备图片
@@ -1332,6 +1382,17 @@ class MainWindowV2(QMainWindow):
                 self.flash_device_img.setText("暂无图片")
 
         self._update_cache_label()
+
+    def _set_flash_doc_button(self, button, url: str, tooltip: str):
+        url = (url or "").strip()
+        button.setProperty("doc_url", url)
+        button.setEnabled(bool(url))
+        button.setToolTip(url if url else tooltip)
+
+    def _open_flash_doc(self, button):
+        url = button.property("doc_url") or ""
+        if url:
+            self._open_url(url)
 
 
     def _update_cache_label(self):
@@ -2097,6 +2158,7 @@ class MainWindowV2(QMainWindow):
         self.flash_thread.progress_msg.connect(self._on_flash_msg)
         self.flash_thread.progress_val.connect(self._on_flash_progress)
         self.flash_thread.progress_log.connect(self._flash_log)
+        self.flash_thread.download_progress.connect(self._on_download_progress)
         self.flash_thread.finished.connect(self._on_flash_done)
         self.flash_thread.start()
 
@@ -2136,6 +2198,11 @@ class MainWindowV2(QMainWindow):
     def _on_flash_msg(self, msg):
         self._active_flash_status_label.setText(msg)
         self._flash_log(f"[INFO] {msg}")
+        # 下载完成后恢复进度条为确定模式
+        if "跳过下载" in msg or "校验" in msg or "解压" in msg or "刷写" in msg:
+            bar = self._active_flash_progress
+            if bar.maximum() == 0:   # indeterminate 状态
+                bar.setRange(0, 100)
         if hasattr(self, "flash_prepare_scene") and self.flash_step_stack.currentIndex() == 0:
             if "解压" in msg:
                 self.flash_prepare_scene.set_mode("downloading")
@@ -2153,6 +2220,31 @@ class MainWindowV2(QMainWindow):
         if hasattr(self, "flash_scene") and self.flash_step_stack.currentIndex() == 2:
             self.flash_scene.set_download_progress(value / 100)
 
+    def _on_download_progress(self, downloaded: int, total: int):
+        """处理真实下载字节进度，更新进度条和状态标签。"""
+        bar = self._active_flash_progress
+
+        def _fmt(b):
+            if b >= 1024 ** 3:
+                return f"{b / 1024 ** 3:.1f} GB"
+            if b >= 1024 ** 2:
+                return f"{b / 1024 ** 2:.0f} MB"
+            return f"{b / 1024:.0f} KB"
+
+        if total > 0:
+            pct = int(downloaded / total * 100)
+            bar.setRange(0, 100)
+            bar.setValue(pct)
+            label_text = f"下载固件中... {_fmt(downloaded)} / {_fmt(total)}  ({pct}%)"
+            if hasattr(self, "flash_prepare_scene") and self.flash_step_stack.currentIndex() == 0:
+                self.flash_prepare_scene.set_download_progress(pct / 100)
+        else:
+            # total 未知：切换为 indeterminate 样式（range 0,0）
+            bar.setRange(0, 0)
+            label_text = f"下载固件中... {_fmt(downloaded)}"
+
+        self._active_flash_status_label.setText(label_text)
+
     def _on_flash_done(self, ok, msg):
         was_prepare_only = getattr(self, "_flash_prepare_only", False)
         was_download_only = getattr(self, "_flash_download_only", False)
@@ -2165,6 +2257,8 @@ class MainWindowV2(QMainWindow):
         self.flash_run_retry_btn.setVisible(False)
         color = C_GREEN if ok else C_RED
         icon = "✓" if ok else "✗"
+        # 恢复进度条为确定模式（防止 indeterminate 状态残留）
+        self._active_flash_progress.setRange(0, 100)
         self._active_flash_progress.setValue(100 if ok else max(5, self._active_flash_progress.value()))
         self._active_flash_status_label.setText(f"{icon} {msg}")
         self._active_flash_status_label.setStyleSheet(f"color:{color}; background:transparent;")
@@ -2269,26 +2363,85 @@ class MainWindowV2(QMainWindow):
         links_lay.addLayout(link_grid)
         inner_lay.addWidget(links_card)
 
-        # Recovery 指南入口
-        rec_card = make_card(12)
-        rec_lay = QVBoxLayout(rec_card)
-        rec_lay.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
-        rec_lay.setSpacing(pt(16))
-        rec_lay.addWidget(make_label("Recovery 模式指南", 15, C_TEXT, bold=True))
-        rec_lay.addWidget(make_label("按产品型号查看进入 Recovery 模式的详细步骤", 12, C_TEXT3))
+        # 产品购买入口
+        buy_card = make_card(12)
+        buy_lay = QVBoxLayout(buy_card)
+        buy_lay.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
+        buy_lay.setSpacing(pt(16))
+        buy_lay.addWidget(make_label("购买商品", 15, C_TEXT, bold=True))
+        buy_lay.addWidget(make_label("按产品型号打开对应商品页，购买整机或官方配套版本。", 12, C_TEXT3))
 
-        rec_combo = QComboBox()
-        rec_combo.addItems(sorted(self.products.keys()))
-        rec_lay.addWidget(rec_combo)
+        self.community_buy_combo = QComboBox()
+        self.community_buy_combo.addItems(sorted(self.products.keys()))
+        self.community_buy_combo.currentTextChanged.connect(self._update_community_buy_button)
+        buy_lay.addWidget(self.community_buy_combo)
 
-        rec_btn = make_button("查看指南", primary=True, small=True)
-        rec_lay.addWidget(rec_btn)
-        inner_lay.addWidget(rec_card)
+        self.community_buy_btn = make_button("购买商品", primary=True, small=True)
+        self.community_buy_btn.clicked.connect(
+            lambda: self._open_selected_product_purchase(self.community_buy_combo.currentText())
+        )
+        buy_lay.addWidget(self.community_buy_btn)
+        inner_lay.addWidget(buy_card)
         inner_lay.addStretch()
 
         scroll.setWidget(inner)
         lay.addWidget(scroll, 1)
+        self._update_community_buy_button(self.community_buy_combo.currentText())
         return page
+
+    def _get_product_purchase_url(self, product: str) -> str:
+        info = self.product_images.get(product, {})
+        purchase_url = (info.get("purchase_url") or "").strip()
+        if purchase_url:
+            return purchase_url
+
+        purchase_map = {
+            "j4012s": "https://www.seeedstudio.com/reComputer-Super-Bundle.html",
+            "j4011s": "https://www.seeedstudio.com/reComputer-Super-Bundle.html",
+            "j3011s": "https://www.seeedstudio.com/reComputer-Super-Bundle.html",
+            "j3010s": "https://www.seeedstudio.com/reComputer-Super-Bundle.html",
+            "j4012mini": "https://www.seeedstudio.com/reComputer-Mini-optional-accessories.html",
+            "j4011mini": "https://www.seeedstudio.com/reComputer-Mini-optional-accessories.html",
+            "j3011mini": "https://www.seeedstudio.com/reComputer-Mini-optional-accessories.html",
+            "j3010mini": "https://www.seeedstudio.com/reComputer-Mini-optional-accessories.html",
+            "j4012robotics": "https://www.seeedstudio.com/reComputer-Robotics-J4012-p-6505.html",
+            "j4011robotics": "https://www.seeedstudio.com/reComputer-Robotics-J4012-p-6505.html",
+            "j3011robotics": "https://www.seeedstudio.com/reComputer-Robotics-J3011-p-6503.html",
+            "j3010robotics": "https://www.seeedstudio.com/reComputer-Robotics-J4012-p-6505.html",
+            "j4012classic": "https://www.seeedstudio.com/reComputer-J4012-w-o-power-adapter-p-5628.html",
+            "j4011classic": "https://www.seeedstudio.com/reComputer-J4011-w-o-power-adapter-p-5629.html",
+            "j3011classic": "https://www.seeedstudio.com/reComputer-J3011-p-5590.html",
+            "j3010classic": "https://www.seeedstudio.com/reComputer-J3010-w-o-power-adapter-p-5631.html",
+            "j4012industrial": "https://www.seeedstudio.com/reComputer-Industrial-J4012-p-5684.html",
+            "j4011industrial": "https://www.seeedstudio.com/reComputer-Industrial-J4011-p-5681.html",
+            "j3011industrial": "https://www.seeedstudio.com/reComputer-Industrial-J3011-p-5682.html",
+            "j3010industrial": "https://www.seeedstudio.com/reComputer-Industrial-J3010-p-5686.html",
+            "j2012industrial": "https://www.seeedstudio.com/reComputer-Industrial-J2012-p-5685.html",
+            "j2011industrial": "https://www.seeedstudio.com/reComputer-Industrial-J2011-p-5683.html",
+            "j4012reserver": "https://www.seeedstudio.com/reServer-industrial-J4012-p-5747.html",
+            "j4011reserver": "https://www.seeedstudio.com/reServer-industrial-J4011-p-5748.html",
+            "j3011reserver": "https://www.seeedstudio.com/reServer-industrial-J3011-p-5750.html",
+            "j3010reserver": "https://www.seeedstudio.com/reServer-industrial-J3010-p-5749.html",
+            "j501-carrier AGX-Orin 64g": "https://www.seeedstudio.com/reServer-Industrial-J501-Carrier-Board-Add-on.html",
+            "j501-carrier AGX-Orin 32g": "https://www.seeedstudio.com/reServer-Industrial-J501-Carrier-Board-Add-on.html",
+            "j501mini-agx-orin-64g": "https://www.seeedstudio.com/reComputer-Mini-J501-Carrier-Board-for-Jetson-AGX-Orin-p-6606.html",
+            "j501mini-agx-orin-32g": "https://www.seeedstudio.com/reComputer-Mini-J501-Carrier-Board-for-Jetson-AGX-Orin-p-6606.html",
+            "j501-agx-orin-64g": "https://www.seeedstudio.com/reComputer-Robotics-J5012-with-GMSL-extension-board-p-6682.html",
+            "j501-agx-orin-32g": "https://www.seeedstudio.com/reComputer-Robotics-J5012-with-GMSL-extension-board-p-6682.html",
+        }
+        return purchase_map.get(product, (info.get("getting_started") or "").strip())
+
+    def _update_community_buy_button(self, product: str):
+        if not hasattr(self, "community_buy_btn"):
+            return
+        url = self._get_product_purchase_url(product)
+        self.community_buy_btn.setEnabled(bool(url))
+        self.community_buy_btn.setToolTip(url if url else "未找到该产品的购买链接")
+
+    def _open_selected_product_purchase(self, product: str):
+        url = self._get_product_purchase_url(product)
+        if url:
+            self._open_url(url)
 
     def _open_url(self, url):
         from PyQt5.QtGui import QDesktopServices
@@ -2312,10 +2465,7 @@ def main():
     if screen:
         dpi = screen.logicalDotsPerInch()
         base_pt = max(11, round(13 * dpi / 96))
-        app.setFont(QFont(
-            "Noto Sans CJK SC, PingFang SC, Microsoft YaHei, Segoe UI, sans-serif",
-            base_pt,
-        ))
+        app.setFont(build_app_font(base_pt))
 
     win = MainWindowV2()
 
