@@ -257,7 +257,7 @@ class AgentInstallDialog(QDialog):
             QMessageBox.warning(self, "提示", "请至少选择一个 Agent。")
             return
 
-        pwd = self._runner.password
+        pwd = self._runner.sudo_password
         escaped = pwd.replace("'", "'\\''")
         cmds: list[tuple[str, int]] = []
 

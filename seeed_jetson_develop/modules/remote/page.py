@@ -387,7 +387,7 @@ class _VscodeWebDialog(QDialog):
             "[ -f ${CACHE}/${DEB} ] && [ $(stat -c%s ${CACHE}/${DEB}) -gt 52428800 ] || "
             "  { echo '下载失败，文件不完整'; exit 1; } && "
             "echo '安装中…' && "
-            f"echo {self._runner.password!r} | sudo -S dpkg -i ${{CACHE}}/${{DEB}} 2>&1"
+            f"echo {self._runner.sudo_password!r} | sudo -S dpkg -i ${{CACHE}}/${{DEB}} 2>&1"
         )
         cmds = [
             (install_cmd, 600),
@@ -733,6 +733,7 @@ def build_page() -> QWidget:
         data["remote_last_host"] = _ip_input.text().strip()
         data["remote_last_user"] = _user_input.text().strip() or "seeed"
         data["remote_last_password"] = _pass_input.text()
+        data["remote_last_sudo_password"] = _sudo_input.text()
         data["remote_last_subnet"] = _subnet_input.text().strip()
         _cfg.save(data)
 
@@ -814,6 +815,28 @@ def build_page() -> QWidget:
     """)
     auth_row.addWidget(_pass_input)
     conn_lay.addLayout(auth_row)
+
+    sudo_row = QHBoxLayout()
+    sudo_row.setSpacing(10)
+    sudo_row.addWidget(_lbl("sudo 密码", 11, C_TEXT3))
+    _sudo_input = QLineEdit()
+    _sudo_input.setPlaceholderText("留空则默认使用登录密码")
+    _sudo_input.setEchoMode(QLineEdit.Password)
+    _sudo_input.setText(_conn_cfg.get("remote_last_sudo_password", ""))
+    _sudo_input.setFixedHeight(_pt(40))
+    _sudo_input.setStyleSheet(f"""
+        QLineEdit {{
+            background:{C_CARD_LIGHT};
+            border:none;
+            border-radius:8px;
+            padding:6px 12px;
+            color:{C_TEXT};
+            font-size:{_pt(11)}px;
+        }}
+    """)
+    sudo_row.addWidget(_sudo_input, 1)
+    sudo_row.addWidget(_lbl("用于 apt / systemctl / docker 等提权命令", 10, C_TEXT3))
+    conn_lay.addLayout(sudo_row)
 
     # 扫描子网输入
     subnet_row = QHBoxLayout()
@@ -929,7 +952,12 @@ def build_page() -> QWidget:
                 f"color:{C_GREEN}; font-size:{_pt(11)}px; background:transparent; font-weight:700;"
             )
             _save_remote_form()
-            set_runner(SSHRunner(ip, username=user, password=pwd))
+            set_runner(SSHRunner(
+                ip,
+                username=user,
+                password=pwd,
+                sudo_password=_sudo_input.text().strip() or pwd,
+            ))
             bus.device_connected.emit({"ip": ip, "name": "Jetson", "model": ""})
         else:
             _conn_status_lbl.setText("● 连接失败")

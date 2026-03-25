@@ -21,6 +21,16 @@ from seeed_jetson_develop.modules.remote.net_share import (
 from seeed_jetson_develop.core.runner import SSHRunner, get_runner
 
 
+class _RefreshThread(QThread):
+    """后台枚举网卡，避免 PowerShell 启动时阻塞 UI。"""
+    done = pyqtSignal(list, object)  # ifaces, wan_default (str|None)
+
+    def run(self):
+        ifaces = list_interfaces()
+        wan_default = detect_wan_interface()
+        self.done.emit(ifaces, wan_default)
+
+
 class _NatThread(QThread):
     """后台执行 NAT 开启/关闭。"""
     done = pyqtSignal(bool, str)  # ok, log
@@ -50,7 +60,7 @@ class _JetsonGatewayThread(QThread):
         self._gateway = gateway
 
     def run(self):
-        cmd = build_jetson_gateway_cmd(self._runner.password, self._gateway)
+        cmd = build_jetson_gateway_cmd(self._runner.sudo_password, self._gateway)
         rc, out = self._runner.run(cmd, timeout=15)
         if rc == 0:
             # 验证连通性
@@ -68,6 +78,7 @@ class NetShareDialog(QDialog):
         super().__init__(parent)
         self._thread: _NatThread | None = None
         self._jetson_thread: _JetsonGatewayThread | None = None
+        self._refresh_thread: _RefreshThread | None = None
         self._sharing = False
         self._jetson_ip = jetson_ip
 
@@ -202,8 +213,20 @@ class NetShareDialog(QDialog):
         self._refresh_ifaces()
 
     def _refresh_ifaces(self):
-        ifaces = list_interfaces()
-        wan_default = detect_wan_interface()
+        self._refresh_btn.setEnabled(False)
+        self._refresh_btn.setText("检测中…")
+        self._wan_combo.clear()
+        self._lan_combo.clear()
+        self._wan_combo.addItem("正在检测网卡…")
+        self._lan_combo.addItem("正在检测网卡…")
+
+        self._refresh_thread = _RefreshThread()
+        self._refresh_thread.done.connect(self._on_ifaces_loaded)
+        self._refresh_thread.start()
+
+    def _on_ifaces_loaded(self, ifaces: list, wan_default):
+        self._refresh_btn.setEnabled(True)
+        self._refresh_btn.setText("刷新网卡")
 
         self._wan_combo.clear()
         self._lan_combo.clear()
@@ -222,7 +245,7 @@ class NetShareDialog(QDialog):
         # LAN 智能选择：如果有 Jetson IP，找同网段的 PC 网卡
         lan_picked = False
         if self._jetson_ip:
-            jetson_parts = self._jetson_ip.rsplit(".", 1)[0]  # e.g. "192.168.6"
+            jetson_parts = self._jetson_ip.rsplit(".", 1)[0]
             for iface in ifaces:
                 if iface["ip"] and iface["ip"].rsplit(".", 1)[0] == jetson_parts:
                     for i in range(self._lan_combo.count()):

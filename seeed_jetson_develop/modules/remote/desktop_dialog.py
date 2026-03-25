@@ -249,7 +249,7 @@ class DesktopRemoteDialog(QDialog):
 
     # ── 一键部署（VNC + noVNC 全流程）─────────────────────────────────────────
     def _do_deploy_all(self):
-        pwd = self._runner.password
+        pwd = self._runner.sudo_password
         vnc_pwd = self._vnc_pwd.text().strip()
         cmds = [
             # 1. 安装 x11vnc
