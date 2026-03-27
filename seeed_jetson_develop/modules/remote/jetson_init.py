@@ -820,6 +820,9 @@ class JetsonInitDialog(QDialog):
         self._update_ui(self._current_port())
         self._focus_terminal_surface()
         self._send_terminal_bytes(b"\r")
+        # 延迟设置 TERM，确保 shell 已就绪
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(1000, lambda: self._send_terminal_bytes(b"export TERM=xterm-256color\r\n"))
 
     def _append_terminal_output(self, text: str):
         self._append_terminal_surface(text)

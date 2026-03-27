@@ -107,7 +107,7 @@ class AgentInstallDialog(QDialog):
         self.setWindowTitle("AI Agent 安装")
         self.setMinimumSize(660, 540)
         self.setSizeGripEnabled(True)
-        self.setStyleSheet(f"background:{C_BG}; color:{C_TEXT};")
+        self.setStyleSheet(f"background:{C_CARD}; color:{C_TEXT}; border-radius:12px;")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 22, 24, 22)
@@ -257,7 +257,7 @@ class AgentInstallDialog(QDialog):
             QMessageBox.warning(self, "提示", "请至少选择一个 Agent。")
             return
 
-        pwd = self._runner.password
+        pwd = self._runner.sudo_password
         escaped = pwd.replace("'", "'\\''")
         cmds: list[tuple[str, int]] = []
 
