@@ -3,7 +3,9 @@ Seeed Jetson Develop Tool - 主窗口 V2
 无边框大气风格 - 用背景层次代替线条
 """
 import json
+import logging
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +34,9 @@ from ..modules.remote.jetson_init import open_jetson_init_dialog
 from .flash_animation import FlashAnimationWidget
 from .ai_chat import FloatingAIAssistant, build_ai_system_prompt
 from .runtime_i18n import apply_language, translate_text
+
+
+log = logging.getLogger("seeed")
 
 
 # ─────────────────────────────────────────────
@@ -471,13 +476,19 @@ class MainWindowV2(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.setStyleSheet("background:transparent;")
         from seeed_jetson_develop.modules.devices.page import build_page as _devices_page
-        from seeed_jetson_develop.modules.apps.page import build_page as _apps_page
-        from seeed_jetson_develop.modules.skills.page import build_page as _skills_page
         from seeed_jetson_develop.modules.remote.page import build_page as _remote_page
         self.stack.addWidget(self._build_flash_page())
         self.stack.addWidget(_devices_page())
-        self.stack.addWidget(_apps_page())
-        self.stack.addWidget(_skills_page())
+        # Apps 页面延迟加载
+        self._apps_placeholder = QWidget()
+        self._apps_placeholder.setStyleSheet(f"background:{C_BG};")
+        self._apps_built = False
+        self.stack.addWidget(self._apps_placeholder)
+        # Skills 页面延迟加载
+        self._skills_placeholder = QWidget()
+        self._skills_placeholder.setStyleSheet(f"background:{C_BG};")
+        self._skills_built = False
+        self.stack.addWidget(self._skills_placeholder)
         self.stack.addWidget(_remote_page())
         self.stack.addWidget(self._build_community_page())
         content_layout.addWidget(self.stack)
@@ -711,7 +722,7 @@ class MainWindowV2(QMainWindow):
 
     def eventFilter(self, src, ev):
         if self._lang == "en" and ev.type() == QEvent.Show and isinstance(src, QWidget):
-            QTimer.singleShot(0, lambda w=src: apply_language(w, self._lang))
+            QTimer.singleShot(0, self._apply_runtime_language)
         if src is getattr(self, "_titlebar", None):
             if ev.type() == QEvent.MouseButtonDblClick:
                 self._toggle_max(); return True
@@ -772,10 +783,68 @@ class MainWindowV2(QMainWindow):
         return sidebar
 
     def _set_page(self, idx):
+        # Apps 页面（index=2）首次访问时懒加载
+        if idx == 2 and not self._apps_built:
+            try:
+                from seeed_jetson_develop.modules.apps.page import build_page as _apps_page
+                real_page = _apps_page()
+            except Exception:
+                msg = traceback.format_exc()
+                log.error("failed to build App Market page\n%s", msg)
+                real_page = self._build_lazy_error_page(
+                    "App Market",
+                    "页面加载失败，请重试或查看日志。",
+                    msg,
+                )
+            self._apps_built = True
+            self.stack.removeWidget(self._apps_placeholder)
+            self._apps_placeholder.deleteLater()
+            self.stack.insertWidget(2, real_page)
+        # Skills 页面（index=3）首次访问时懒加载
+        if idx == 3 and not self._skills_built:
+            try:
+                from seeed_jetson_develop.modules.skills.page import build_page as _skills_page
+                real_page = _skills_page()
+            except Exception:
+                msg = traceback.format_exc()
+                log.error("failed to build Skills page\n%s", msg)
+                real_page = self._build_lazy_error_page(
+                    "Skills",
+                    "页面加载失败，请重试或查看日志。",
+                    msg,
+                )
+            self._skills_built = True
+            self.stack.removeWidget(self._skills_placeholder)
+            self._skills_placeholder.deleteLater()
+            self.stack.insertWidget(3, real_page)
         self._current_page = idx
         self.stack.setCurrentIndex(idx)
         for i, btn in enumerate(self._nav_btns):
             btn.setActive(i == idx)
+
+    def _build_lazy_error_page(self, title: str, message: str, detail: str) -> QWidget:
+        page = QWidget()
+        page.setStyleSheet(f"background:{C_BG};")
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(pt(32), pt(28), pt(32), pt(28))
+        lay.setSpacing(pt(18))
+
+        card = make_card(12)
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
+        card_lay.setSpacing(pt(12))
+        card_lay.addWidget(make_label(title, 16, C_TEXT, bold=True))
+        card_lay.addWidget(make_label(message, 12, C_TEXT2, wrap=True))
+
+        detail_box = QTextEdit()
+        detail_box.setReadOnly(True)
+        detail_box.setMinimumHeight(pt(220))
+        detail_box.setPlainText(detail[-1500:])
+        card_lay.addWidget(detail_box)
+
+        lay.addWidget(card)
+        lay.addStretch()
+        return page
 
     def _update_env_label(self):
         if not hasattr(self, "_env_dot"):

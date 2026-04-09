@@ -387,7 +387,7 @@ class _VscodeWebDialog(QDialog):
             "[ -f ${CACHE}/${DEB} ] && [ $(stat -c%s ${CACHE}/${DEB}) -gt 52428800 ] || "
             "  { echo '下载失败，文件不完整'; exit 1; } && "
             "echo '安装中…' && "
-            f"echo {self._runner.password!r} | sudo -S dpkg -i ${{CACHE}}/${{DEB}} 2>&1"
+            f"echo {self._runner.sudo_password!r} | sudo -S dpkg -i ${{CACHE}}/${{DEB}} 2>&1"
         )
         cmds = [
             (install_cmd, 600),
@@ -733,6 +733,7 @@ def build_page() -> QWidget:
         data["remote_last_host"] = _ip_input.text().strip()
         data["remote_last_user"] = _user_input.text().strip() or "seeed"
         data["remote_last_password"] = _pass_input.text()
+        data["remote_last_sudo_password"] = _sudo_input.text()
         data["remote_last_subnet"] = _subnet_input.text().strip()
         _cfg.save(data)
 
@@ -814,6 +815,28 @@ def build_page() -> QWidget:
     """)
     auth_row.addWidget(_pass_input)
     conn_lay.addLayout(auth_row)
+
+    sudo_row = QHBoxLayout()
+    sudo_row.setSpacing(10)
+    sudo_row.addWidget(_lbl("sudo 密码", 11, C_TEXT3))
+    _sudo_input = QLineEdit()
+    _sudo_input.setPlaceholderText("留空则默认使用登录密码")
+    _sudo_input.setEchoMode(QLineEdit.Password)
+    _sudo_input.setText(_conn_cfg.get("remote_last_sudo_password", ""))
+    _sudo_input.setFixedHeight(_pt(40))
+    _sudo_input.setStyleSheet(f"""
+        QLineEdit {{
+            background:{C_CARD_LIGHT};
+            border:none;
+            border-radius:8px;
+            padding:6px 12px;
+            color:{C_TEXT};
+            font-size:{_pt(11)}px;
+        }}
+    """)
+    sudo_row.addWidget(_sudo_input, 1)
+    sudo_row.addWidget(_lbl("用于 apt / systemctl / docker 等提权命令", 10, C_TEXT3))
+    conn_lay.addLayout(sudo_row)
 
     # 扫描子网输入
     subnet_row = QHBoxLayout()
@@ -929,7 +952,16 @@ def build_page() -> QWidget:
                 f"color:{C_GREEN}; font-size:{_pt(11)}px; background:transparent; font-weight:700;"
             )
             _save_remote_form()
-            set_runner(SSHRunner(ip, username=user, password=pwd))
+            set_runner(SSHRunner(
+                ip,
+                username=user,
+                password=pwd,
+                sudo_password=_sudo_input.text().strip() or pwd,
+            ))
+            # 标记最后一次连接成功，用于下次启动自动恢复
+            data = _cfg.load()
+            data["remote_last_connected"] = True
+            _cfg.save(data)
             bus.device_connected.emit({"ip": ip, "name": "Jetson", "model": ""})
         else:
             _conn_status_lbl.setText("● 连接失败")
@@ -938,6 +970,9 @@ def build_page() -> QWidget:
             )
             _conn_status_lbl.setToolTip(err)
             set_runner(None)
+            data = _cfg.load()
+            data["remote_last_connected"] = False
+            _cfg.save(data)
             bus.device_disconnected.emit(ip)
 
     ssh_test_btn.clicked.connect(_do_ssh_test)
@@ -1031,8 +1066,18 @@ def build_page() -> QWidget:
     lay.addWidget(conn_card)
     _refresh_init_summary()
 
-    for widget in (_ip_input, _user_input, _pass_input, _subnet_input):
+    for widget in (_ip_input, _user_input, _pass_input, _sudo_input, _subnet_input):
         widget.editingFinished.connect(_save_remote_form)
+
+    # 监听全局断线事件（runner 自动断线时同步 UI）
+    def _on_bus_disconnected(ip: str):
+        _conn_status_lbl.setText("● 连接断开")
+        _conn_status_lbl.setStyleSheet(
+            f"color:{C_RED}; font-size:{_pt(11)}px; background:transparent; font-weight:700;"
+        )
+        _conn_status_lbl.setToolTip(f"与 {ip} 的连接已断开，请重新连接")
+
+    bus.device_disconnected.connect(_on_bus_disconnected)
 
     # ─────────────────────────────────────────────────────────────
     # 卡片 D：开发工具
@@ -1184,4 +1229,52 @@ def build_page() -> QWidget:
     lay.addStretch()
     scroll.setWidget(inner)
     root.addWidget(scroll, 1)
+
+    # ── 启动时自动重连上次设备 ─────────────────────────────────────
+    def _try_auto_reconnect():
+        """如果 config 中保存了上次连接信息，后台静默尝试重连。"""
+        host = _ip_input.text().strip()
+        user = _user_input.text().strip() or "seeed"
+        pwd  = _pass_input.text()
+        if not host or not pwd:
+            return
+        # 上次未成功连接则跳过自动重连
+        cfg_data = _cfg.load()
+        if not cfg_data.get("remote_last_connected", False):
+            return
+        # 已经有活跃连接则跳过
+        r = get_runner()
+        if isinstance(r, SSHRunner) and r.host == host:
+            return
+        _conn_status_lbl.setText("● 自动连接中…")
+        _conn_status_lbl.setStyleSheet(
+            f"color:{C_TEXT3}; font-size:{_pt(11)}px; background:transparent;"
+        )
+
+        def _on_auto_result(ok: bool, err: str):
+            if ok:
+                _conn_status_lbl.setText("● 已连通")
+                _conn_status_lbl.setStyleSheet(
+                    f"color:{C_GREEN}; font-size:{_pt(11)}px; background:transparent; font-weight:700;"
+                )
+                set_runner(SSHRunner(
+                    host,
+                    username=user,
+                    password=pwd,
+                    sudo_password=_sudo_input.text().strip() or pwd,
+                ))
+                bus.device_connected.emit({"ip": host, "name": "Jetson", "model": ""})
+            else:
+                _conn_status_lbl.setText("● 未连接")
+                _conn_status_lbl.setStyleSheet(
+                    f"color:{C_TEXT3}; font-size:{_pt(11)}px; background:transparent;"
+                )
+
+        t = _SSHCheckThread(host, user, pwd)
+        t.result.connect(_on_auto_result)
+        t.start()
+        _ssh_thread[0] = t
+
+    _try_auto_reconnect()
+
     return page
