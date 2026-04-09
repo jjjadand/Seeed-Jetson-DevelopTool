@@ -21,24 +21,25 @@ def _run(cmd: str, sudo_password: str = "") -> tuple[int, str]:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
         return r.returncode, (r.stdout + r.stderr).strip()
     if sudo_password:
-        # 先用 sudo -S -k 强制刷新凭证（-k 使当前缓存失效，确保密码被读取）
-        # 然后用 sudo -n 执行实际命令（凭证已缓存，不需要再次输入密码）
-        auth_proc = subprocess.Popen(
-            ["sudo", "-S", "-k", "true"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True,
-        )
-        auth_proc.communicate(input=sudo_password + "\n", timeout=10)
-        # 无论 auth 是否成功，都尝试执行命令（可能凭证已缓存）
         proc = subprocess.Popen(
-            ["sudo", "-n", "bash", "-c", cmd],
+            ["sudo", "-S", "bash", "-c", cmd],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True,
         )
-        out, err = proc.communicate(timeout=30)
+        out, err = proc.communicate(input=sudo_password + "\n", timeout=30)
+        # 过滤 sudo 密码提示行，避免污染日志
         combined = out
-        if err and err.strip():
-            combined = (combined + "\n" + err).strip()
+        if err:
+            filtered = "\n".join(
+                line for line in err.splitlines()
+                if line.strip()
+                and not line.strip().startswith("[sudo]")
+                and "password for" not in line.lower()
+                and "需要密码" not in line
+                and "的密码" not in line
+            )
+            if filtered.strip():
+                combined = (combined + "\n" + filtered).strip()
         return proc.returncode, combined.strip()
     r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=30)
     return r.returncode, (r.stdout + r.stderr).strip()
@@ -169,6 +170,9 @@ def enable_nat(wan: str, lan: str, sudo_password: str = "") -> tuple[bool, str]:
 
 def _enable_nat_linux(wan: str, lan: str, sudo_password: str) -> tuple[bool, str]:
     steps = [
+        # 持久化写入 sysctl.conf（重启后也生效），同时立即激活
+        "grep -q 'net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null || "
+        "echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf; "
         "sysctl -w net.ipv4.ip_forward=1",
         f"iptables -t nat -C POSTROUTING -o {wan} -j MASQUERADE 2>/dev/null || "
         f"iptables -t nat -A POSTROUTING -o {wan} -j MASQUERADE",
