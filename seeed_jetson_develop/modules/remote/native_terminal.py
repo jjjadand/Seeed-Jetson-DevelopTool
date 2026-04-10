@@ -4,8 +4,8 @@ from collections.abc import Mapping
 
 import pyte
 from PyQt5.QtCore import QEvent, Qt, pyqtSignal
-from PyQt5.QtGui import QFont, QFontMetrics, QTextCursor
-from PyQt5.QtWidgets import QApplication, QPlainTextEdit
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QTextCharFormat, QTextCursor
+from PyQt5.QtWidgets import QApplication, QPlainTextEdit, QTextEdit
 
 from seeed_jetson_develop.gui.theme import build_mono_font
 
@@ -150,12 +150,15 @@ class NativeTerminalWidget(QPlainTextEdit):
         if not lines:
             lines = [""]
 
+        cursor_selection = None
         if self._cursor_visible and 0 <= self._screen.cursor.y < len(self._screen.display):
             idx = len(lines) - len(self._screen.display) + self._screen.cursor.y
-            row = list(lines[idx].ljust(self._columns))
-            if 0 <= self._screen.cursor.x < len(row):
-                row[self._screen.cursor.x] = row[self._screen.cursor.x] if row[self._screen.cursor.x] != " " else "\u2588"
-                lines[idx] = "".join(row).rstrip()
+            row = lines[idx]
+            cursor_x = max(0, self._screen.cursor.x)
+            if cursor_x >= len(row):
+                row = row.ljust(cursor_x + 1)
+                lines[idx] = row
+            cursor_selection = (idx, cursor_x)
 
         content = "\n".join(lines)
         self._updating = True
@@ -163,6 +166,7 @@ class NativeTerminalWidget(QPlainTextEdit):
             scrollbar = self.verticalScrollBar()
             was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
             self.setPlainText(content)
+            self.setExtraSelections(self._build_cursor_selections(cursor_selection))
             cursor = self.textCursor()
             cursor.movePosition(QTextCursor.End)
             self.setTextCursor(cursor)
@@ -170,3 +174,24 @@ class NativeTerminalWidget(QPlainTextEdit):
                 scrollbar.setValue(scrollbar.maximum())
         finally:
             self._updating = False
+
+    def _build_cursor_selections(self, cursor_selection):
+        if cursor_selection is None:
+            return []
+
+        line_no, column = cursor_selection
+        block = self.document().findBlockByNumber(line_no)
+        if not block.isValid():
+            return []
+
+        position = block.position() + min(column, block.length() - 1)
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(position)
+        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, 1)
+
+        selection = QTextEdit.ExtraSelection()
+        selection.cursor = cursor
+        selection.format = QTextCharFormat()
+        selection.format.setBackground(QColor("#7AB317"))
+        selection.format.setForeground(QColor("#0B0F14"))
+        return [selection]

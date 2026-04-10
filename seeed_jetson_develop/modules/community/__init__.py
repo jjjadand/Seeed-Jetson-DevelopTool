@@ -1,2 +1,2 @@
-"""社区模块 — 文档链接、Recovery 指南、论坛"""
+"""Community module with docs links, recovery guides, and forum entry."""
 from .page import build_page

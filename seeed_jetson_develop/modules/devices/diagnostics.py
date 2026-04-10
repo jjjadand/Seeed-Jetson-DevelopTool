@@ -1,18 +1,18 @@
-"""诊断项定义 — 快速诊断 / 外设检测 / 设备信息"""
+"""Diagnostics definitions for quick checks, peripheral checks, and device info."""
 import re
 from dataclasses import dataclass
 from typing import Callable
 from seeed_jetson_develop.core.runner import Runner
 
-# 匹配串口终端的 shell prompt，如 seeed@seeed-desktop:~$
+# Match shell prompts from serial terminal output, e.g. seeed@seeed-desktop:~$
 _PROMPT_RE = re.compile(r'\w[\w-]*@[\w-]+:[^\n]*?[#$]\s*')
 
 def _strip_prompts(out: str) -> str:
-    """去除串口输出中的 shell prompt 行。"""
+    """Remove shell prompt fragments from serial command output."""
     return _PROMPT_RE.sub('', out).strip()
 
 
-# ── reComputer 型号识别（解析 /etc/nv_tegra_release 中的 Seeed Image Name）──
+# reComputer model detection (parse Seeed Image Name from /etc/nv_tegra_release).
 
 _PART_MAP: dict[str, str] = {
     'recomputer': 'reComputer', 'reserver': 'reServer',
@@ -23,7 +23,7 @@ _PART_MAP: dict[str, str] = {
 }
 
 def _extract_image_prefix(image_name: str) -> str:
-    """从镜像文件名中剥离版本/日期后缀，返回硬件标识前缀。
+    """Strip version/date suffix from image filename and return hardware prefix.
 
     mfi_recomputer-mini-agx-orin-32g-j501-6.2.1-36.4.-2026-02-11.tar.gz
     → mfi_recomputer-mini-agx-orin-32g-j501
@@ -32,15 +32,15 @@ def _extract_image_prefix(image_name: str) -> str:
     parts = name.split('-')
     prefix_parts = []
     for part in parts:
-        if re.match(r'^\d+\.\d+', part):   # 版本号如 6.2.1 / 36.4
+        if re.match(r'^\d+\.\d+', part):   # version marker like 6.2.1 / 36.4
             break
-        if re.match(r'^\d{4}$', part):     # 年份如 2026
+        if re.match(r'^\d{4}$', part):     # year marker like 2026
             break
         prefix_parts.append(part)
     return '-'.join(prefix_parts)
 
 def _format_product_name(prefix: str) -> str:
-    """将硬件前缀格式化为可读型号名。
+    """Format hardware prefix into readable product name.
 
     mfi_recomputer-mini-agx-orin-32g-j501 → reComputer J501 Mini AGX Orin 32G
     mfi_reserver-agx-orin-64g-j501        → reServer J501 AGX Orin 64G
@@ -55,9 +55,9 @@ def _format_product_name(prefix: str) -> str:
         lp = part.lower()
         if lp in ('recomputer', 'reserver'):
             series = _PART_MAP[lp]
-        elif re.match(r'^j\d+[a-z]?$', lp):       # 载板号：j401 j501 j201 j30 j40
+        elif re.match(r'^j\d+[a-z]?$', lp):       # carrier board ID: j401 j501 j201 j30 j40
             carrier = part.upper()
-        elif re.match(r'^\d+[gq]$', lp):            # 内存容量：32g 16g 64g 16q
+        elif re.match(r'^\d+[gq]$', lp):           # memory size: 32g 16g 64g 16q
             rest.append(part.upper())
         else:
             rest.append(_PART_MAP.get(lp, part.capitalize()))
@@ -68,7 +68,7 @@ def _format_product_name(prefix: str) -> str:
     return ' '.join(out)
 
 def _identify_recomputer_model(nv_tegra_content: str) -> str | None:
-    """从 /etc/nv_tegra_release 内容识别具体 reComputer 型号。"""
+    """Identify specific reComputer model from /etc/nv_tegra_release content."""
     m = re.search(r'Seeed Image Name\s+(\S+)', nv_tegra_content)
     if not m:
         return None
@@ -91,86 +91,110 @@ class DiagItem:
 # color_key: "ok" | "warn" | "error" | "info"
 
 def _net(rc, out):
-    return ("正常", "ok") if rc == 0 else ("无法连接", "error")
+    return ("Normal", "ok") if rc == 0 else ("Unreachable", "error")
 
 def _torch(rc, out):
-    if rc == 0 and "True" in out:  return ("CUDA 可用", "ok")
-    if rc == 0:                    return ("CPU 模式", "warn")
-    return ("未安装", "error")
+    if rc == 0 and "True" in out:  return ("CUDA Available", "ok")
+    if rc == 0:                    return ("CPU Only", "warn")
+    return ("Not Installed", "error")
 
 def _docker(rc, out):
-    return ("运行中", "ok") if rc == 0 else ("未运行", "error")
+    return ("Running", "ok") if rc == 0 else ("Not Running", "error")
 def _jtop(rc, out):
-    return ("已安装", "ok") if rc == 0 and out.strip() else ("未安装", "warn")
+    return ("Installed", "ok") if rc == 0 and out.strip() else ("Not Installed", "warn")
 
 def _camera(rc, out):
     devices = [l for l in out.splitlines() if l.strip()]
     if rc == 0 and devices:
-        return (f"已检测到 {len(devices)} 个", "ok")
-    return ("未检测到", "warn")
+        return (f"Found {len(devices)}", "ok")
+    return ("Not Detected", "warn")
 
 def _disk(rc, out):
     if rc != 0 or not out.strip():
-        return ("检测失败", "error")
+        return ("Check Failed", "error")
     line = out.strip().splitlines()[0]
     return (line[:40], "info")
 
 
-# ── 快速诊断项 ──────────────────────────────────────────────────────────────
+# Quick diagnostics.
 DIAG_ITEMS: list[DiagItem] = [
-    DiagItem("network", "🌐", "网络连接",
+    DiagItem("network", "🌐", "Network Connectivity",
              "ping -c 1 -W 2 8.8.8.8", _net),
     DiagItem("torch",   "⚡", "GPU / Torch",
              "python3 -c 'import torch; print(torch.cuda.is_available())'", _torch),
-    DiagItem("docker",  "🐳", "Docker 服务",
+    DiagItem("docker",  "🐳", "Docker Service",
              "docker ps -q", _docker),
-    DiagItem("jtop",    "📊", "jtop 监控",
+    DiagItem("jtop",    "📊", "jtop Monitor",
              "pip3 show jtop 2>/dev/null | grep -i name || python3 -m jtop --version 2>/dev/null || which jtop 2>/dev/null", _jtop),
-    DiagItem("camera",  "📷", "USB 摄像头",
-             "ls /dev/video* 2>/dev/null", _camera),
-    DiagItem("disk",    "💾", "启动磁盘",
+    DiagItem("camera",  "📷", "USB Camera",
+             r"""bash -lc '
+primary_nodes=()
+for node in /sys/class/video4linux/video*; do
+  [ -e "$node" ] || continue
+  idx_file="$node/index"
+  if [ -f "$idx_file" ]; then
+    idx="$(cat "$idx_file" 2>/dev/null)"
+    [ "$idx" = "0" ] || continue
+  fi
+  primary_nodes+=("/dev/$(basename "$node")")
+done
+printf "%s\n" "${primary_nodes[@]}"
+'""", _camera),
+    DiagItem("disk",    "💾", "Boot Disk",
              "lsblk -d -o NAME,SIZE,TYPE | grep disk | head -2", _disk),
 ]
 
 
-# ── 外设检测项 ──────────────────────────────────────────────────────────────
+# Peripheral checks.
 def _periph_found(rc, out):
-    return ("已检测到", "ok") if rc == 0 and out.strip() else ("未检测到", "warn")
+    return ("Detected", "ok") if rc == 0 and out.strip() else ("Not Detected", "warn")
 
 def _bt(rc, out):
     if rc == 0 and out.strip():
-        return ("已检测到", "ok")
-    return ("未检测到", "warn")
+        return ("Detected", "ok")
+    return ("Not Detected", "warn")
 
 def _hdmi(rc, out):
     if rc == 0 and "connected" in out.lower():
-        return ("已连接", "ok")
-    return ("未连接", "warn")
+        return ("Connected", "ok")
+    return ("Disconnected", "warn")
 
 def _nvme(rc, out):
     if rc == 0 and out.strip():
-        # 只统计 disk 类型，过滤掉分区（nvme0n1p1 等）
+        # Count only disk type lines, exclude partitions (e.g. nvme0n1p1).
         lines = [l for l in out.splitlines() if "nvme" in l.lower() and "disk" in l.lower()]
-        return (f"已检测到 {len(lines)} 个", "ok") if lines else ("未检测到", "warn")
-    return ("未检测到", "warn")
+        return (f"Found {len(lines)}", "ok") if lines else ("Not Detected", "warn")
+    return ("Not Detected", "warn")
 
 PERIPH_ITEMS: list[DiagItem] = [
     DiagItem("usb_wifi",  "📡", "USB-WiFi",
              "iwconfig 2>/dev/null | grep -v 'no wireless'| grep ESSID", _periph_found),
-    DiagItem("5g",        "📶", "5G 模组",
+    DiagItem("5g",        "📶", "5G Module",
              "lsusb 2>/dev/null | grep -iE 'quectel|sierra|huawei|modem|EC[0-9]|RM[0-9]'", _periph_found),
-    DiagItem("bluetooth", "🔵", "蓝牙",
+    DiagItem("bluetooth", "🔵", "Bluetooth",
              "hciconfig 2>/dev/null | grep 'BD Address'", _bt),
     DiagItem("nvme",      "💾", "NVMe SSD",
              "lsblk -d -o NAME,TYPE 2>/dev/null | grep nvme", _nvme),
-    DiagItem("cam_dev",   "📷", "摄像头",
-             "ls /dev/video* 2>/dev/null", _camera),
-    DiagItem("hdmi",      "🖥",  "HDMI 显示",
+    DiagItem("cam_dev",   "📷", "Camera",
+             r"""bash -lc '
+primary_nodes=()
+for node in /sys/class/video4linux/video*; do
+  [ -e "$node" ] || continue
+  idx_file="$node/index"
+  if [ -f "$idx_file" ]; then
+    idx="$(cat "$idx_file" 2>/dev/null)"
+    [ "$idx" = "0" ] || continue
+  fi
+  primary_nodes+=("/dev/$(basename "$node")")
+done
+printf "%s\n" "${primary_nodes[@]}"
+'""", _camera),
+    DiagItem("hdmi",      "🖥",  "HDMI Display",
              "cat /sys/class/drm/card0*/status 2>/dev/null | head -1", _hdmi),
 ]
 
 
-# ── 设备基本信息 ────────────────────────────────────────────────────────────
+# Device base info.
 INFO_CMDS: dict[str, str] = {
     "model": (
         r"""python3 -c "import pathlib;"""
@@ -187,7 +211,7 @@ INFO_CMDS: dict[str, str] = {
 
 
 def run_all(runner: Runner, on_result: Callable[[str, str, str], None]):
-    """逐项执行快速诊断，每项完成后回调 on_result(item_id, status_text, color_key)。"""
+    """Run all quick diagnostics and callback on_result(item_id, status_text, color_key)."""
     for item in DIAG_ITEMS:
         rc, out = runner.run(item.cmd, timeout=10)
         status, color = item.parse(rc, _strip_prompts(out))
@@ -195,7 +219,7 @@ def run_all(runner: Runner, on_result: Callable[[str, str, str], None]):
 
 
 def run_periph(runner: Runner, on_result: Callable[[str, str, str], None]):
-    """逐项执行外设检测，回调同 run_all。"""
+    """Run all peripheral checks; callback signature is the same as run_all."""
     for item in PERIPH_ITEMS:
         rc, out = runner.run(item.cmd, timeout=8)
         status, color = item.parse(rc, _strip_prompts(out))
@@ -203,14 +227,14 @@ def run_periph(runner: Runner, on_result: Callable[[str, str, str], None]):
 
 
 def collect_info(runner: Runner) -> dict[str, str]:
-    """采集设备基本信息，返回 key→value 字典。"""
+    """Collect device information and return key-to-value mapping."""
     result = {}
     for key, cmd in INFO_CMDS.items():
         rc, out = runner.run(cmd, timeout=5)
         val = _strip_prompts(out)
         result[key] = val if rc == 0 and val else "—"
 
-    # 尝试从 /etc/nv_tegra_release 的 Seeed Image Name 识别具体型号
+    # Try identifying exact model from Seeed Image Name in /etc/nv_tegra_release.
     rc, out = runner.run("cat /etc/nv_tegra_release 2>/dev/null", timeout=5)
     if rc == 0:
         seeed_model = _identify_recomputer_model(_strip_prompts(out))

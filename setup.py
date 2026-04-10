@@ -25,6 +25,10 @@ setup(
         "click>=8.0.0",
         "rich>=10.0.0",
         "PyQt5>=5.15.0",
+        "paramiko>=2.8.0",
+        "anthropic>=0.20.0",
+        "pyserial>=3.5",
+        "pyte>=0.8.2",
     ],
     entry_points={
         "console_scripts": [

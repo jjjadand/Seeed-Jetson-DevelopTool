@@ -1,4 +1,4 @@
-"""烧录页 UI — 从 main_window_v2 迁移，独立模块化"""
+"""Flash page UI."""
 import json
 import logging
 import threading
@@ -17,6 +17,8 @@ from PyQt5.QtWidgets import (
 from seeed_jetson_develop.core.events import bus
 from seeed_jetson_develop.flash import JetsonFlasher, sudo_authenticate, sudo_check_cached
 from seeed_jetson_develop.gui.flash_animation import FlashAnimationWidget
+from seeed_jetson_develop.gui.i18n_binding import I18nBinding
+from seeed_jetson_develop.gui.i18n import get_language, t
 from seeed_jetson_develop.gui.theme import (
     C_BG, C_BG_DEEP, C_BLUE, C_CARD_LIGHT, C_GREEN, C_ORANGE, C_RED,
     C_TEXT, C_TEXT2, C_TEXT3, make_button, make_card, make_label, pt,
@@ -24,13 +26,13 @@ from seeed_jetson_develop.gui.theme import (
 
 log = logging.getLogger(__name__)
 
-# 数据目录
+# Data directories
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 # ── helpers ──────────────────────────────────────────────────────
-def _page_header(title: str, subtitle: str) -> QWidget:
+def _page_header(title: str, subtitle: str) -> tuple[QWidget, QLabel, QLabel]:
     header = QWidget()
     header.setFixedHeight(pt(64))
     header.setStyleSheet(f"background: {C_BG_DEEP};")
@@ -49,7 +51,7 @@ def _page_header(title: str, subtitle: str) -> QWidget:
     text_col.addWidget(sub_lbl)
     lay.addLayout(text_col)
     lay.addStretch()
-    return header
+    return header, title_lbl, sub_lbl
 
 
 def _open_url(url: str):
@@ -58,7 +60,7 @@ def _open_url(url: str):
 
 
 def _load_flash_data():
-    """加载 l4t_data / product_images，返回 (l4t_data, products, product_images)。"""
+    """Load l4t_data and product_images."""
     l4t_data = []
     product_images = {}
     products = {}
@@ -78,39 +80,65 @@ def _load_flash_data():
     return l4t_data, products, product_images
 
 
+_FLASH_LANG_OVERRIDE: str | None = None
+
+
+def _flash_lang() -> str:
+    return _FLASH_LANG_OVERRIDE or get_language()
+
+
+def _flash_info_html(name: str, versions: int) -> str:
+    lang = _flash_lang()
+    return (
+        f"{t('flash.product_summary.model', lang=lang, name=name)}<br>"
+        f"{t('flash.product_summary.versions', lang=lang, count=versions)}<br>"
+        f"{t('flash.product_summary.docs_shortcut', lang=lang)}"
+    )
+
+
+def _ft(key: str, **kwargs) -> str:
+    return t(key, lang=_flash_lang(), **kwargs)
+
+
 # ═════════════════════════════════════════════════════════════════
-#  build_page() — 闭包模式，返回 QWidget
+# build_page() returns QWidget
 # ═════════════════════════════════════════════════════════════════
 
 def build_page() -> QWidget:
-    """构建并返回烧录页 QWidget。内部自行加载数据。"""
+    """Build and return flash page QWidget."""
     from .thread import FlashThread
     from seeed_jetson_develop.modules.remote.jetson_init import open_jetson_init_dialog
 
-    # ── 加载数据 ──
+    # Load data
     l4t_data, products, product_images = _load_flash_data()
 
-    # ── 可变状态 ──
+    # Mutable state
     _state = {
         "flash_thread": None,
         "flash_prepare_only": False,
         "flash_download_only": False,
         "flash_flash_only": False,
+        "lang": _flash_lang(),
         "active_status_label": None,
         "active_progress": None,
     }
 
-    # ── 自定义 QWidget，用于 resizeEvent 触发自适应 ──
+    # Custom QWidget for adaptive resize behavior.
     class _FlashPage(QWidget):
         def resizeEvent(self, event):
             super().resizeEvent(event)
             _update_adaptive_layout()
 
     page = _FlashPage()
+    page.i18n = I18nBinding()
     lay = QVBoxLayout(page)
     lay.setContentsMargins(0, 0, 0, 0)
     lay.setSpacing(0)
-    lay.addWidget(_page_header("烧录中心", "选择设备型号与系统版本，一键完成固件刷写"))
+    header_widget, header_title_lbl, header_sub_lbl = _page_header(
+        _ft("flash.page.title"),
+        _ft("flash.page.subtitle"),
+    )
+    lay.addWidget(header_widget)
 
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
@@ -121,13 +149,19 @@ def build_page() -> QWidget:
     inner_lay.setContentsMargins(pt(32), pt(28), pt(32), pt(28))
     inner_lay.setSpacing(pt(24))
 
-    # ── 步骤向导 ──
+    # Step wizard
     wizard_card = make_card(12)
     wizard_outer = QVBoxLayout(wizard_card)
     wizard_outer.setContentsMargins(pt(32), pt(20), pt(32), pt(20))
     wizard_outer.setSpacing(0)
 
-    step_configs = [("1", "选择设备"), ("2", "进入 Recovery"), ("3", "开始刷写"), ("4", "完成")]
+    step_key_order = [
+        "flash.wizard.step.select_device",
+        "flash.wizard.step.enter_recovery",
+        "flash.wizard.step.start_flash",
+        "flash.wizard.step.done",
+    ]
+    step_configs = [(str(i + 1), _ft(k)) for i, k in enumerate(step_key_order)]
     step_layout = QHBoxLayout()
     step_layout.setSpacing(0)
 
@@ -169,15 +203,15 @@ def build_page() -> QWidget:
     wizard_outer.addLayout(step_layout)
     inner_lay.addWidget(wizard_card)
 
-    # ── 两列布局 ──
+    # Two-column layout
     flash_cols = QBoxLayout(QBoxLayout.LeftToRight)
     flash_cols.setSpacing(pt(24))
 
-    # 左列 QStackedWidget
+    # Left stacked panel
     flash_left_stack = QStackedWidget()
     flash_left_stack.setStyleSheet("background:transparent;")
 
-    # ── 左侧页0：设备选择 ──
+    # Left page 0: device selection
     left_page0 = QWidget()
     left_page0.setStyleSheet("background:transparent;")
     left_col = QVBoxLayout(left_page0)
@@ -189,11 +223,14 @@ def build_page() -> QWidget:
     dev_lay.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
     dev_lay.setSpacing(pt(16))
 
-    dev_lay.addWidget(make_label("目标设备", 14, C_TEXT, bold=True))
-    dev_lay.addWidget(make_label("选择产品型号和对应的 L4T 系统版本", 11, C_TEXT3))
+    dev_title_lbl = make_label(_ft("flash.device.title"), 14, C_TEXT, bold=True)
+    dev_sub_lbl = make_label(_ft("flash.device.subtitle"), 11, C_TEXT3)
+    dev_lay.addWidget(dev_title_lbl)
+    dev_lay.addWidget(dev_sub_lbl)
 
     prod_row = QHBoxLayout()
-    prod_row.addWidget(make_label("产品型号", 12, C_TEXT2))
+    prod_name_lbl = make_label(_ft("flash.device.product"), 12, C_TEXT2)
+    prod_row.addWidget(prod_name_lbl)
     prod_row.addStretch()
     flash_product_combo = QComboBox()
     flash_product_combo.setMinimumWidth(260)
@@ -202,14 +239,15 @@ def build_page() -> QWidget:
     dev_lay.addLayout(prod_row)
 
     l4t_row = QHBoxLayout()
-    l4t_row.addWidget(make_label("L4T 版本", 12, C_TEXT2))
+    l4t_name_lbl = make_label(_ft("flash.device.l4t"), 12, C_TEXT2)
+    l4t_row.addWidget(l4t_name_lbl)
     l4t_row.addStretch()
     flash_l4t_combo = QComboBox()
     flash_l4t_combo.setMinimumWidth(260)
     l4t_row.addWidget(flash_l4t_combo)
     dev_lay.addLayout(l4t_row)
 
-    # 设备图片
+    # Device image
     flash_device_img = QLabel()
     flash_device_img.setFixedSize(320, 200)
     flash_device_img.setAlignment(Qt.AlignCenter)
@@ -220,11 +258,11 @@ def build_page() -> QWidget:
         color: {C_TEXT3};
         font-size: {pt(11)}pt;
     """)
-    flash_device_img.setText("暂无图片")
+    flash_device_img.setText(_ft("flash.product_summary.no_image"))
     dev_lay.addWidget(flash_device_img, alignment=Qt.AlignHCenter)
 
-    # 信息展示
-    flash_info = QLabel("等待选择产品...")
+    # Product info
+    flash_info = QLabel(_ft("flash.product_summary.waiting"))
     flash_info.setWordWrap(True)
     flash_info.setTextFormat(Qt.RichText)
     flash_info.setTextInteractionFlags(Qt.TextBrowserInteraction)
@@ -244,13 +282,13 @@ def build_page() -> QWidget:
     flash_docs_row = QHBoxLayout()
     flash_docs_row.setSpacing(pt(10))
 
-    flash_getting_started_btn = make_button("Getting Started", primary=True, small=True)
+    flash_getting_started_btn = make_button(_ft("flash.docs.getting_started"), primary=True, small=True)
     flash_getting_started_btn.clicked.connect(
         lambda: _open_flash_doc(flash_getting_started_btn)
     )
     flash_docs_row.addWidget(flash_getting_started_btn)
 
-    flash_hardware_btn = make_button("Hardware Interface", small=True)
+    flash_hardware_btn = make_button(_ft("flash.docs.hardware_interface"), small=True)
     flash_hardware_btn.clicked.connect(
         lambda: _open_flash_doc(flash_hardware_btn)
     )
@@ -259,24 +297,26 @@ def build_page() -> QWidget:
     dev_lay.addLayout(flash_docs_row)
     left_col.addWidget(dev_card)
 
-    # 选项卡片
+    # Options card
     opt_card = make_card(12)
     opt_lay = QVBoxLayout(opt_card)
     opt_lay.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
     opt_lay.setSpacing(pt(12))
-    opt_lay.addWidget(make_label("执行选项", 14, C_TEXT, bold=True))
-    skip_verify_cb = QCheckBox("跳过 SHA256 校验（不推荐）")
+    opt_title_lbl = make_label(_ft("flash.options.title"), 14, C_TEXT, bold=True)
+    opt_lay.addWidget(opt_title_lbl)
+    skip_verify_cb = QCheckBox(_ft("flash.options.skip_verify"))
     opt_lay.addWidget(skip_verify_cb)
     left_col.addWidget(opt_card)
     left_col.addStretch()
     flash_left_stack.addWidget(left_page0)
 
-    # ── 左侧页1：Recovery 指南 ──
+    # Left page 1: Recovery guide
     rec_guide_card = make_card(12)
     rec_guide_outer = QVBoxLayout(rec_guide_card)
     rec_guide_outer.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
     rec_guide_outer.setSpacing(pt(12))
-    rec_guide_outer.addWidget(make_label("Recovery 模式指南", 14, C_TEXT, bold=True))
+    rec_guide_title_lbl = make_label(_ft("flash.recovery.title"), 14, C_TEXT, bold=True)
+    rec_guide_outer.addWidget(rec_guide_title_lbl)
 
     rec_guide_scroll = QScrollArea()
     rec_guide_scroll.setWidgetResizable(True)
@@ -288,20 +328,23 @@ def build_page() -> QWidget:
     rec_guide_layout = QVBoxLayout(rec_guide_content)
     rec_guide_layout.setContentsMargins(0, 0, pt(8), 0)
     rec_guide_layout.setSpacing(pt(12))
-    rec_guide_layout.addWidget(make_label("请先选择设备", 12, C_TEXT3))
+    rec_guide_empty_lbl = make_label(_ft("flash.recovery.select_first"), 12, C_TEXT3)
+    rec_guide_layout.addWidget(rec_guide_empty_lbl)
     rec_guide_layout.addStretch()
 
     rec_guide_scroll.setWidget(rec_guide_content)
     rec_guide_outer.addWidget(rec_guide_scroll, 1)
     flash_left_stack.addWidget(rec_guide_card)
 
-    # ── 左侧页2：完成后的客户端上手指南 ──
+    # Left page 2: post-flash quick start
     guide_card = make_card(12)
     guide_outer = QVBoxLayout(guide_card)
     guide_outer.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
     guide_outer.setSpacing(pt(14))
-    guide_outer.addWidget(make_label("客户端 Getting Started", 14, C_TEXT, bold=True))
-    guide_outer.addWidget(make_label("刷写完成后，可以继续从这些板块开始上手。", 11, C_TEXT3))
+    guide_title_lbl = make_label(_ft("flash.guide.title"), 14, C_TEXT, bold=True)
+    guide_sub_lbl = make_label(_ft("flash.guide.subtitle"), 11, C_TEXT3)
+    guide_outer.addWidget(guide_title_lbl)
+    guide_outer.addWidget(guide_sub_lbl)
 
     guide_scroll = QScrollArea()
     guide_scroll.setWidgetResizable(True)
@@ -324,7 +367,7 @@ def build_page() -> QWidget:
     hint_lay.setContentsMargins(pt(16), pt(15), pt(16), pt(15))
     hint_lay.setSpacing(pt(8))
 
-    hint_badge = QLabel("推荐路径")
+    hint_badge = QLabel(_ft("flash.guide.recommended"))
     hint_badge.setStyleSheet(f"""
         background: rgba(7,18,0,0.35);
         color: {C_GREEN};
@@ -334,13 +377,13 @@ def build_page() -> QWidget:
         font-weight: 700;
     """)
     hint_lay.addWidget(hint_badge, alignment=Qt.AlignLeft)
-    hint_lay.addWidget(make_label("下一步先完成设备首次开机初始化", 13, C_TEXT, bold=True))
-    hint_lay.addWidget(make_label(
-        "建议先重启设备，完成用户名、网络和基础系统设置，再进入设备管理或远程开发继续配置。",
-        10, C_TEXT2, wrap=True))
+    hint_title_lbl = make_label(_ft("flash.guide.next_title"), 13, C_TEXT, bold=True)
+    hint_desc_lbl = make_label(_ft("flash.guide.next_desc"), 10, C_TEXT2, wrap=True)
+    hint_lay.addWidget(hint_title_lbl)
+    hint_lay.addWidget(hint_desc_lbl)
     hint_btn_row = QHBoxLayout()
     hint_btn_row.setSpacing(pt(10))
-    hint_init_btn = make_button("Jetson 初始化", primary=True, small=True)
+    hint_init_btn = make_button(_ft("flash.btn.jetson_init"), primary=True, small=True)
     hint_init_btn.clicked.connect(lambda: open_jetson_init_dialog(parent=page.window()))
     hint_btn_row.addWidget(hint_init_btn)
     hint_btn_row.addStretch()
@@ -348,13 +391,14 @@ def build_page() -> QWidget:
     guide_layout.addWidget(hint_card)
 
     next_steps = [
-        ("\U0001f5a5", "设备管理", "查看 Jetson 状态、运行诊断、排查外设问题。"),
-        ("\U0001f4e6", "应用市场", "安装常用 AI 应用、推理环境和开发工具。"),
-        ("\U0001f9e0", "Skills", "用内置技能快速完成部署、修复和配置任务。"),
-        ("\U0001f310", "远程开发", "建立 SSH 连接，继续用电脑远程操作设备。"),
-        ("\U0001f4ac", "社区", "查看文档、论坛和常见问题，继续深入使用。"),
+        ("\U0001f5a5", "flash.guide.step.devices.title", "flash.guide.step.devices.desc"),
+        ("\U0001f4e6", "flash.guide.step.apps.title", "flash.guide.step.apps.desc"),
+        ("\U0001f9e0", "flash.guide.step.skills.title", "flash.guide.step.skills.desc"),
+        ("\U0001f310", "flash.guide.step.remote.title", "flash.guide.step.remote.desc"),
+        ("\U0001f4ac", "flash.guide.step.community.title", "flash.guide.step.community.desc"),
     ]
-    for icon, title, desc in next_steps:
+    next_step_text_labels = []
+    for icon, title_key, desc_key in next_steps:
         item_card = QFrame()
         item_card.setStyleSheet(f"""
             background:{C_CARD_LIGHT};
@@ -373,8 +417,11 @@ def build_page() -> QWidget:
 
         text_col_v = QVBoxLayout()
         text_col_v.setSpacing(pt(4))
-        text_col_v.addWidget(make_label(title, 12, C_TEXT, bold=True))
-        text_col_v.addWidget(make_label(desc, 10, C_TEXT2, wrap=True))
+        step_title_lbl = make_label(_ft(title_key), 12, C_TEXT, bold=True)
+        step_desc_lbl = make_label(_ft(desc_key), 10, C_TEXT2, wrap=True)
+        next_step_text_labels.append((step_title_lbl, title_key, step_desc_lbl, desc_key))
+        text_col_v.addWidget(step_title_lbl)
+        text_col_v.addWidget(step_desc_lbl)
         item_lay_h.addLayout(text_col_v, 1)
         guide_layout.addWidget(item_card)
     guide_layout.addStretch()
@@ -385,7 +432,7 @@ def build_page() -> QWidget:
 
     flash_cols.addWidget(flash_left_stack, 1)
 
-    # ── 右列 ──
+    # Right column
     flash_right_panel = QWidget()
     flash_right_panel.setStyleSheet("background:transparent;")
     flash_right_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -395,15 +442,17 @@ def build_page() -> QWidget:
     flash_step_stack = QStackedWidget()
     flash_step_stack.setStyleSheet("background:transparent;")
 
-    # ── 步骤一：准备固件 ──
+    # Step 1: prepare firmware
     step1_card = make_card(12)
     task_lay = QVBoxLayout(step1_card)
     task_lay.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
     task_lay.setSpacing(pt(16))
-    task_lay.addWidget(make_label("步骤一：准备固件", 14, C_TEXT, bold=True))
-    task_lay.addWidget(make_label("下载并解压 BSP 到本地，或使用已有缓存直接进入下一步", 11, C_TEXT3))
+    step1_title_lbl = make_label(_ft("flash.step1.title"), 14, C_TEXT, bold=True)
+    step1_sub_lbl = make_label(_ft("flash.step1.subtitle"), 11, C_TEXT3)
+    task_lay.addWidget(step1_title_lbl)
+    task_lay.addWidget(step1_sub_lbl)
 
-    flash_status_lbl = make_label("尚未开始", 14, C_TEXT2)
+    flash_status_lbl = make_label(_ft("flash.status.not_started"), 14, C_TEXT2)
     task_lay.addWidget(flash_status_lbl)
 
     flash_progress = QProgressBar()
@@ -413,22 +462,18 @@ def build_page() -> QWidget:
     flash_progress.setVisible(False)
     task_lay.addWidget(flash_progress)
 
-    flash_progress_detail_lbl = make_label("", 11, C_TEXT3)
-    flash_progress_detail_lbl.setVisible(False)
-    task_lay.addWidget(flash_progress_detail_lbl)
-
     flash_prepare_scene = FlashAnimationWidget()
     flash_prepare_scene.setFixedHeight(160)
     task_lay.addWidget(flash_prepare_scene)
 
     btn_row = QHBoxLayout()
-    flash_cancel_btn = make_button("取消", danger=True)
+    flash_cancel_btn = make_button(_ft("flash.btn.cancel"), danger=True)
     flash_cancel_btn.setVisible(False)
     flash_cancel_btn.clicked.connect(lambda: _cancel_flash())
 
-    flash_download_btn = QPushButton("下载/解压 BSP")
+    flash_download_btn = QPushButton(_ft("flash.btn.download_extract"))
     flash_download_btn.setCursor(Qt.PointingHandCursor)
-    flash_download_btn.setToolTip("有压缩包则跳过下载直接解压；有解压目录则弹窗确认是否覆盖")
+    flash_download_btn.setToolTip(_ft("flash.btn.download_extract_tip"))
     flash_download_btn.setStyleSheet(f"""
         QPushButton {{
             background: {C_BLUE};
@@ -441,9 +486,9 @@ def build_page() -> QWidget:
     """)
     flash_download_btn.clicked.connect(lambda: _on_prepare_bsp())
 
-    flash_clear_btn = QPushButton("清除缓存")
+    flash_clear_btn = QPushButton(_ft("flash.btn.clear_cache"))
     flash_clear_btn.setCursor(Qt.PointingHandCursor)
-    flash_clear_btn.setToolTip("选择清除压缩包或解压目录")
+    flash_clear_btn.setToolTip(_ft("flash.btn.clear_cache_tip"))
     flash_clear_btn.setStyleSheet(f"""
         QPushButton {{
             background: rgba(245,166,35,0.15);
@@ -456,9 +501,9 @@ def build_page() -> QWidget:
     """)
     flash_clear_btn.clicked.connect(lambda: _clear_firmware_cache())
 
-    flash_next_btn = QPushButton("下一步 \u2192")
+    flash_next_btn = QPushButton(_ft("flash.btn.next"))
     flash_next_btn.setCursor(Qt.PointingHandCursor)
-    flash_next_btn.setToolTip("已有解压目录，直接进入刷写步骤")
+    flash_next_btn.setToolTip(_ft("flash.btn.next_tip"))
     flash_next_btn.setStyleSheet(f"""
         QPushButton {{
             background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
@@ -485,22 +530,22 @@ def build_page() -> QWidget:
     task_lay.addWidget(flash_cache_lbl)
     flash_step_stack.addWidget(step1_card)
 
-    # ── 步骤二：进入 Recovery 模式 ──
+    # Step 2: enter Recovery mode
     step2_card = make_card(12)
     rec_lay = QVBoxLayout(step2_card)
     rec_lay.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
     rec_lay.setSpacing(pt(16))
-    rec_lay.addWidget(make_label("步骤二：进入 Recovery 模式", 14, C_TEXT, bold=True))
-    rec_lay.addWidget(make_label(
-        "将设备通过 USB 连接到本机，按住 Recovery 键后上电（或按 Reset），\n"
-        "然后点击「检测设备」确认设备已进入 Recovery 模式。",
-        11, C_TEXT3))
+    step2_title_lbl = make_label(_ft("flash.step2.title"), 14, C_TEXT, bold=True)
+    step2_sub_lbl = make_label(_ft("flash.step2.subtitle"), 11, C_TEXT3)
+    step2_sub_lbl.setWordWrap(True)
+    rec_lay.addWidget(step2_title_lbl)
+    rec_lay.addWidget(step2_sub_lbl)
 
-    rec_status_lbl = make_label("等待检测...", 13, C_TEXT2)
+    rec_status_lbl = make_label(_ft("flash.status.waiting_detection"), 13, C_TEXT2)
     rec_lay.addWidget(rec_status_lbl)
 
     rec_btn_row = QHBoxLayout()
-    rec_back_btn = QPushButton("\u2190 返回")
+    rec_back_btn = QPushButton(_ft("flash.btn.back"))
     rec_back_btn.setCursor(Qt.PointingHandCursor)
     rec_back_btn.setStyleSheet(f"""
         QPushButton {{
@@ -513,7 +558,7 @@ def build_page() -> QWidget:
     """)
     rec_back_btn.clicked.connect(lambda: _flash_go_step1())
 
-    rec_detect_btn = QPushButton("检测设备")
+    rec_detect_btn = QPushButton(_ft("flash.btn.detect_device"))
     rec_detect_btn.setCursor(Qt.PointingHandCursor)
     rec_detect_btn.setStyleSheet(f"""
         QPushButton {{
@@ -527,7 +572,7 @@ def build_page() -> QWidget:
     """)
     rec_detect_btn.clicked.connect(lambda: _detect_recovery())
 
-    rec_flash_btn = QPushButton("开始刷写 \u2192")
+    rec_flash_btn = QPushButton(_ft("flash.btn.start_flash"))
     rec_flash_btn.setCursor(Qt.PointingHandCursor)
     rec_flash_btn.setEnabled(False)
     rec_flash_btn.setStyleSheet(f"""
@@ -551,14 +596,15 @@ def build_page() -> QWidget:
     rec_lay.addLayout(rec_btn_row)
     flash_step_stack.addWidget(step2_card)
 
-    # ── 步骤三：开始刷写 ──
+    # Step 3: flashing
     step3_card = make_card(12)
     run_lay = QVBoxLayout(step3_card)
     run_lay.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
     run_lay.setSpacing(pt(16))
-    run_lay.addWidget(make_label("步骤三：开始刷写", 14, C_TEXT, bold=True))
+    step3_title_lbl = make_label(_ft("flash.step3.title"), 14, C_TEXT, bold=True)
+    run_lay.addWidget(step3_title_lbl)
 
-    flash_run_status_lbl = make_label("准备开始刷写...", 13, C_TEXT2)
+    flash_run_status_lbl = make_label(_ft("flash.status.preparing_flash"), 13, C_TEXT2)
     run_lay.addWidget(flash_run_status_lbl)
 
     flash_run_progress = QProgressBar()
@@ -572,12 +618,12 @@ def build_page() -> QWidget:
     run_lay.addWidget(flash_scene)
 
     run_btn_row = QHBoxLayout()
-    flash_run_cancel_btn = make_button("取消", danger=True)
+    flash_run_cancel_btn = make_button(_ft("flash.btn.cancel"), danger=True)
     flash_run_cancel_btn.clicked.connect(lambda: _cancel_flash())
-    flash_run_retry_btn = make_button("重新烧录", primary=True)
+    flash_run_retry_btn = make_button(_ft("flash.btn.retry_flash"), primary=True)
     flash_run_retry_btn.setVisible(False)
     flash_run_retry_btn.clicked.connect(lambda: _retry_flash())
-    flash_run_back_btn = make_button("返回 Recovery", small=False)
+    flash_run_back_btn = make_button(_ft("flash.btn.back_to_recovery"), small=False)
     flash_run_back_btn.setVisible(False)
     flash_run_back_btn.clicked.connect(lambda: _flash_go_next_step())
     run_btn_row.addWidget(flash_run_cancel_btn)
@@ -587,13 +633,14 @@ def build_page() -> QWidget:
     run_lay.addLayout(run_btn_row)
     flash_step_stack.addWidget(step3_card)
 
-    # ── 步骤四：完成 ──
+    # Step 4: done
     step4_card = make_card(12)
     done_lay = QVBoxLayout(step4_card)
     done_lay.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
     done_lay.setSpacing(pt(16))
-    done_lay.addWidget(make_label("步骤四：完成", 14, C_TEXT, bold=True))
-    flash_done_status_lbl = make_label("刷写已完成。", 13, C_GREEN)
+    step4_title_lbl = make_label(_ft("flash.step4.title"), 14, C_TEXT, bold=True)
+    done_lay.addWidget(step4_title_lbl)
+    flash_done_status_lbl = make_label(_ft("flash.status.done"), 13, C_GREEN)
     done_lay.addWidget(flash_done_status_lbl)
 
     flash_done_scene = FlashAnimationWidget()
@@ -602,9 +649,9 @@ def build_page() -> QWidget:
     done_lay.addWidget(flash_done_scene)
 
     done_btn_row = QHBoxLayout()
-    flash_done_init_btn = make_button("Jetson 初始化", primary=True)
+    flash_done_init_btn = make_button(_ft("flash.btn.jetson_init"), primary=True)
     flash_done_init_btn.clicked.connect(lambda: open_jetson_init_dialog(parent=page.window()))
-    flash_done_restart_btn = make_button("重新开始")
+    flash_done_restart_btn = make_button(_ft("flash.btn.restart"))
     flash_done_restart_btn.clicked.connect(lambda: _flash_reset_to_start())
     done_btn_row.addWidget(flash_done_init_btn)
     done_btn_row.addStretch()
@@ -614,18 +661,19 @@ def build_page() -> QWidget:
 
     right_col.addWidget(flash_step_stack)
 
-    # 日志卡片
+    # Log card
     log_card = make_card(12)
     log_lay_inner = QVBoxLayout(log_card)
     log_lay_inner.setContentsMargins(pt(24), pt(20), pt(24), pt(20))
     log_lay_inner.setSpacing(pt(12))
     hdr = QHBoxLayout()
-    hdr.addWidget(make_label("日志", 14, C_TEXT, bold=True))
+    log_title_lbl = make_label(_ft("flash.log.title"), 14, C_TEXT, bold=True)
+    hdr.addWidget(log_title_lbl)
     hdr.addStretch()
-    save_btn = make_button("保存日志", small=True)
+    save_btn = make_button(_ft("flash.log.save"), small=True)
     save_btn.clicked.connect(lambda: _save_flash_log())
     hdr.addWidget(save_btn)
-    clear_log_btn = make_button("清空", small=True)
+    clear_log_btn = make_button(_ft("flash.log.clear"), small=True)
     clear_log_btn.clicked.connect(lambda: flash_log.clear())
     hdr.addWidget(clear_log_btn)
     log_lay_inner.addLayout(hdr)
@@ -647,9 +695,7 @@ def build_page() -> QWidget:
     scroll.setWidget(inner)
     lay.addWidget(scroll, 1)
 
-    # ═════════════════════════════════════════════
-    #  闭包方法
-    # ═════════════════════════════════════════════
+    # Local helper methods.
 
     def _flash_log_append(text: str):
         flash_log.moveCursor(QTextCursor.End)
@@ -659,21 +705,21 @@ def build_page() -> QWidget:
     def _save_flash_log():
         text = flash_log.toPlainText().strip()
         if not text:
-            _flash_log_append("[WARN] 当前没有可保存的日志")
+            _flash_log_append(_ft("flash.log.warn_empty"))
             return
         default_name = f"seeed_flash_log_{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
         default_path = str(Path.home() / default_name)
         file_path, _ = QFileDialog.getSaveFileName(
-            page.window(), "保存烧录日志", default_path,
+            page.window(), _ft("flash.log.save_dialog_title"), default_path,
             "Log Files (*.log);;Text Files (*.txt);;All Files (*)",
         )
         if not file_path:
             return
         try:
             Path(file_path).write_text(text + "\n", encoding="utf-8")
-            _flash_log_append(f"[OK] 日志已保存到 {file_path}")
+            _flash_log_append(_ft("flash.log.saved", path=file_path))
         except Exception as exc:
-            _flash_log_append(f"[ERR] 保存日志失败: {exc}")
+            _flash_log_append(_ft("flash.log.save_failed", error=exc))
 
     def _cancel_flash():
         if _state["flash_thread"]:
@@ -710,14 +756,10 @@ def build_page() -> QWidget:
         versions = len(products.get(product, []))
         getting_started = info.get("getting_started", "").strip()
         hardware_interfaces = info.get("hardware_interfaces", "").strip()
-        flash_info.setText(
-            f"型号：{name}<br>"
-            f"可用版本：{versions} 个<br>"
-            "文档快捷入口：使用下方按钮打开"
-        )
-        _set_flash_doc_button(flash_getting_started_btn, getting_started, "打开该产品的 Getting Started Wiki")
-        _set_flash_doc_button(flash_hardware_btn, hardware_interfaces, "打开该产品的 Hardware Interface Wiki")
-        # 加载设备图片
+        flash_info.setText(_flash_info_html(name, versions))
+        _set_flash_doc_button(flash_getting_started_btn, getting_started, _ft("flash.docs.getting_started_tip"))
+        _set_flash_doc_button(flash_hardware_btn, hardware_interfaces, _ft("flash.docs.hardware_tip"))
+        # Load device image.
         local_img = info.get("local_image", "")
         img_path = _PROJECT_ROOT / local_img if local_img else None
         if img_path and img_path.exists():
@@ -726,7 +768,7 @@ def build_page() -> QWidget:
             flash_device_img.setText("")
         else:
             flash_device_img.clear()
-            flash_device_img.setText("暂无图片")
+            flash_device_img.setText(t("flash.product_summary.no_image", lang=get_language()))
         _update_cache_label()
 
     def _update_cache_label():
@@ -739,7 +781,7 @@ def build_page() -> QWidget:
             has_archive = flasher.firmware_cached()
             has_extracted = flasher.firmware_extracted()
             if has_extracted:
-                flash_cache_lbl.setText("已下载并解压，可直接刷写（跳过下载）")
+                flash_cache_lbl.setText(t("flash.cache.extracted_ready", lang=get_language()))
                 flash_cache_lbl.setStyleSheet(f"color:{C_GREEN}; font-size:{pt(11)}pt; background:transparent;")
                 flash_prepare_scene.set_mode("idle")
                 flash_prepare_scene.set_download_progress(1.0)
@@ -747,14 +789,16 @@ def build_page() -> QWidget:
             elif has_archive:
                 fp = flasher.download_dir / flasher.firmware_info['filename']
                 size_mb = fp.stat().st_size / 1024 / 1024
-                flash_cache_lbl.setText(f"已缓存压缩包 {size_mb:.0f} MB，刷写时将自动解压")
+                flash_cache_lbl.setText(
+                    t("flash.cache.archive_ready", lang=get_language(), size_mb=size_mb)
+                )
                 flash_cache_lbl.setStyleSheet(f"color:{C_BLUE}; font-size:{pt(11)}pt; background:transparent;")
                 if not flash_cancel_btn.isVisible():
                     flash_prepare_scene.set_mode("idle")
                     flash_prepare_scene.set_download_progress(0.0)
                 _set_next_enabled(False)
             else:
-                flash_cache_lbl.setText("无本地缓存，请先点击「下载/解压 BSP」")
+                flash_cache_lbl.setText(t("flash.cache.no_local", lang=get_language()))
                 flash_cache_lbl.setStyleSheet(f"""
                     color: {C_ORANGE}; font-size: {pt(11)}pt;
                     background: rgba(245,166,35,0.10); border-radius: 6px; padding: 4px 10px;
@@ -782,14 +826,14 @@ def build_page() -> QWidget:
             return
 
         dlg = QDialog(page.window())
-        dlg.setWindowTitle("清除缓存")
+        dlg.setWindowTitle(_ft("flash.dialog.clear_cache.title"))
         dlg.setMinimumWidth(420)
         dlg.setStyleSheet(f"background:{C_BG};")
         d_lay = QVBoxLayout(dlg)
         d_lay.setSpacing(12)
         d_lay.setContentsMargins(20, 20, 20, 20)
-        d_lay.addWidget(make_label("选择要清除的内容：", 13, C_TEXT))
-        d_lay.addWidget(make_label("可只清除压缩包，或只清理解压后的工作目录。", 10, C_TEXT3))
+        d_lay.addWidget(make_label(_ft("flash.dialog.clear_cache.prompt"), 13, C_TEXT))
+        d_lay.addWidget(make_label(_ft("flash.dialog.clear_cache.details"), 10, C_TEXT3))
 
         checkbox_style = f"""
             QCheckBox {{ color: {C_TEXT2}; font-size: {pt(12)}pt; spacing: 0px; padding: 10px 14px;
@@ -797,8 +841,8 @@ def build_page() -> QWidget:
             QCheckBox:hover {{ background: rgba(255,255,255,0.04); }}
             QCheckBox::indicator {{ width: 0px; height: 0px; }}
         """
-        archive_label = "  压缩包缓存（.tar.gz / .tar）"
-        extracted_label = "  解压目录（工作目录）"
+        archive_label = "  " + _ft("flash.dialog.clear_cache.archive")
+        extracted_label = "  " + _ft("flash.dialog.clear_cache.extracted")
         cb_archive = QCheckBox()
         cb_extracted = QCheckBox()
         cb_archive.setStyleSheet(checkbox_style)
@@ -807,7 +851,7 @@ def build_page() -> QWidget:
         cb_extracted.setChecked(True)
 
         def _sync_checkbox_text(box: QCheckBox, label: str):
-            suffix = "  已选中" if box.isChecked() else ""
+            suffix = f"  {_ft('flash.dialog.clear_cache.selected')}" if box.isChecked() else ""
             box.setText(f"{label}{suffix}")
             box.setStyleSheet(
                 checkbox_style
@@ -828,8 +872,8 @@ def build_page() -> QWidget:
         d_btn_row = QHBoxLayout()
         d_btn_row.setSpacing(10)
         d_btn_row.addStretch()
-        cancel_btn_d = make_button("取消")
-        ok_btn = make_button("确认清除", primary=True)
+        cancel_btn_d = make_button(_ft("common.cancel"))
+        ok_btn = make_button(_ft("flash.dialog.clear_cache.confirm"), primary=True)
         cancel_btn_d.clicked.connect(dlg.reject)
         ok_btn.clicked.connect(dlg.accept)
         d_btn_row.addWidget(cancel_btn_d)
@@ -842,11 +886,11 @@ def build_page() -> QWidget:
             flasher = JetsonFlasher(product, l4t)
             removed = flasher.clear_cache(clear_archive=cb_archive.isChecked(), clear_extracted=cb_extracted.isChecked())
             if removed:
-                _flash_log_append("[INFO] 已清除:\n" + "\n".join(f"  {p}" for p in removed))
+                _flash_log_append(_ft("flash.log.cache_cleared") + "\n" + "\n".join(f"  {p}" for p in removed))
             else:
-                _flash_log_append("[INFO] 无缓存可清除")
+                _flash_log_append(_ft("flash.log.cache_none"))
         except Exception as e:
-            _flash_log_append(f"[ERR] 清除缓存失败: {e}")
+            _flash_log_append(_ft("flash.log.cache_clear_failed", error=e))
         _update_cache_label()
         _set_next_enabled(False)
 
@@ -855,18 +899,18 @@ def build_page() -> QWidget:
         if sudo_check_cached():
             return True
         dlg = QDialog(page.window())
-        dlg.setWindowTitle("需要本机管理员权限")
+        dlg.setWindowTitle(_ft("flash.dialog.sudo.title"))
         dlg.setMinimumWidth(400)
         dlg.setStyleSheet(f"background:{C_BG};")
         d_lay = QVBoxLayout(dlg)
         d_lay.setSpacing(12)
         d_lay.setContentsMargins(20, 20, 20, 20)
-        d_lay.addWidget(make_label("解压和烧录固件需要 sudo 权限。", 13, C_TEXT))
+        d_lay.addWidget(make_label(_ft("flash.dialog.sudo.desc"), 13, C_TEXT))
         try:
             username = _getpass.getuser()
         except Exception:
-            username = "当前用户"
-        hint_lbl = QLabel(f"  本机（PC）sudo 密码  ·  用户：{username}")
+            username = _ft("flash.dialog.sudo.current_user")
+        hint_lbl = QLabel("  " + _ft("flash.dialog.sudo.hint", username=username))
         hint_lbl.setStyleSheet(f"""
             color: {C_BLUE}; background: rgba(41,121,255,0.10);
             border-radius: 6px; padding: 6px 10px; font-size: {pt(11)}pt;
@@ -874,7 +918,7 @@ def build_page() -> QWidget:
         d_lay.addWidget(hint_lbl)
         pwd_input = QLineEdit()
         pwd_input.setEchoMode(QLineEdit.Password)
-        pwd_input.setPlaceholderText("输入本机密码...")
+        pwd_input.setPlaceholderText(_ft("flash.dialog.sudo.password_placeholder"))
         pwd_input.setStyleSheet(f"""
             QLineEdit {{ background: {C_CARD_LIGHT}; border: none; border-radius: 8px;
                 color: {C_TEXT}; padding: 8px 12px; font-size: {pt(12)}pt; }}
@@ -893,13 +937,13 @@ def build_page() -> QWidget:
             pwd = pwd_input.text()
             if sudo_authenticate(pwd):
                 return True
-            err_lbl.setText("密码错误，请重试")
+            err_lbl.setText(_ft("flash.dialog.sudo.password_wrong"))
             pwd_input.clear()
             pwd_input.setFocus()
 
     def _on_prepare_bsp():
         if not _ensure_sudo():
-            _flash_log_append("[WARN] 未获得 sudo 权限，操作取消")
+            _flash_log_append(_ft("flash.log.sudo_denied_operation"))
             return
         product = flash_product_combo.currentText()
         l4t = flash_l4t_combo.currentText()
@@ -915,22 +959,22 @@ def build_page() -> QWidget:
 
         if has_extracted:
             msg = QMessageBox(page.window())
-            msg.setWindowTitle("已有解压目录")
-            msg.setText("检测到本地已有解压好的固件目录。\n是否覆盖重新下载并解压？")
-            msg.setInformativeText("选择「跳过」可直接使用现有目录进入下一步。")
-            skip_btn = msg.addButton("跳过，直接下一步", QMessageBox.AcceptRole)
-            overwrite_btn = msg.addButton("覆盖重新下载解压", QMessageBox.DestructiveRole)
-            msg.addButton("取消", QMessageBox.RejectRole)
+            msg.setWindowTitle(_ft("flash.dialog.extracted_exists.title"))
+            msg.setText(_ft("flash.dialog.extracted_exists.text"))
+            msg.setInformativeText(_ft("flash.dialog.extracted_exists.info"))
+            skip_btn = msg.addButton(_ft("flash.dialog.extracted_exists.btn.skip"), QMessageBox.AcceptRole)
+            overwrite_btn = msg.addButton(_ft("flash.dialog.extracted_exists.btn.overwrite"), QMessageBox.DestructiveRole)
+            msg.addButton(_ft("common.cancel"), QMessageBox.RejectRole)
             msg.exec_()
             clicked = msg.clickedButton()
             if clicked is skip_btn:
-                _flash_log_append("[INFO] 使用现有解压目录，跳过下载解压")
+                _flash_log_append(_ft("flash.log.use_existing_extracted"))
                 _set_next_enabled(True)
                 return
             elif clicked is overwrite_btn:
                 _run_flash_thread(product, l4t, force_redownload=True, prepare_only=True)
         elif has_archive:
-            _flash_log_append("[INFO] 压缩包已存在，跳过下载，直接解压")
+            _flash_log_append(_ft("flash.log.archive_exists_skip_download"))
             _run_flash_thread(product, l4t, force_redownload=False, prepare_only=True)
         else:
             _run_flash_thread(product, l4t, force_redownload=False, prepare_only=True)
@@ -963,7 +1007,7 @@ def build_page() -> QWidget:
         flash_step_stack.setCurrentIndex(1)
         flash_left_stack.setCurrentIndex(1)
         _build_recovery_guide(flash_product_combo.currentText())
-        rec_status_lbl.setText("等待检测...")
+        rec_status_lbl.setText(_ft("flash.status.waiting_detection"))
         rec_status_lbl.setStyleSheet(f"color:{C_TEXT2}; background:transparent;")
         rec_flash_btn.setEnabled(False)
         flash_scene.set_mode("idle")
@@ -986,14 +1030,12 @@ def build_page() -> QWidget:
         _set_wizard_step(0)
         flash_step_stack.setCurrentIndex(0)
         flash_left_stack.setCurrentIndex(0)
-        flash_status_lbl.setText("尚未开始")
+        flash_status_lbl.setText(_ft("flash.status.not_started"))
         flash_status_lbl.setStyleSheet(f"color:{C_TEXT2}; background:transparent;")
-        flash_run_status_lbl.setText("准备开始刷写...")
+        flash_run_status_lbl.setText(_ft("flash.status.ready_start"))
         flash_run_status_lbl.setStyleSheet(f"color:{C_TEXT2}; background:transparent;")
         flash_progress.setVisible(False)
         flash_progress.setValue(0)
-        flash_progress_detail_lbl.clear()
-        flash_progress_detail_lbl.setVisible(False)
         flash_run_progress.setValue(0)
         flash_prepare_scene.set_mode("idle")
         flash_prepare_scene.set_download_progress(0.0)
@@ -1011,22 +1053,22 @@ def build_page() -> QWidget:
                 item.widget().deleteLater()
         guide = get_guide(product)
         if not guide:
-            rec_guide_layout.addWidget(make_label("暂无该设备的 Recovery 指南", 12, C_TEXT3))
+            rec_guide_layout.addWidget(make_label(_ft("flash.recovery.no_guide"), 12, C_TEXT3))
             rec_guide_layout.addStretch()
             return
         title_lbl = make_label(guide["title"], 13, C_TEXT, bold=True)
         title_lbl.setWordWrap(True)
         rec_guide_layout.addWidget(title_lbl)
-        rec_guide_layout.addWidget(make_label(f"所需线缆：{guide['cable']}", 11, C_TEXT2))
+        rec_guide_layout.addWidget(make_label(_ft("flash.recovery.required_cable", cable=guide["cable"]), 11, C_TEXT2))
         if guide.get("image_url") or guide.get("local_image"):
             img_lbl = QLabel()
             img_lbl.setAlignment(Qt.AlignCenter)
             img_lbl.setFixedHeight(280)
-            img_lbl.setText("图片加载中...")
+            img_lbl.setText(_ft("flash.image.loading"))
             img_lbl.setStyleSheet(f"color:{C_TEXT3}; background:{C_CARD_LIGHT}; border-radius:8px; font-size:{pt(10)}pt;")
             rec_guide_layout.addWidget(img_lbl)
             _load_guide_image(guide.get("image_url", ""), img_lbl, guide.get("local_image", ""), guide["title"])
-        rec_guide_layout.addWidget(make_label("操作步骤：", 12, C_TEXT, bold=True))
+        rec_guide_layout.addWidget(make_label(_ft("flash.recovery.steps"), 12, C_TEXT, bold=True))
         for i, step in enumerate(guide["steps"], 1):
             row = QHBoxLayout()
             row.setSpacing(pt(8))
@@ -1043,9 +1085,9 @@ def build_page() -> QWidget:
             container.setStyleSheet("background:transparent;")
             container.setLayout(row)
             rec_guide_layout.addWidget(container)
-        rec_guide_layout.addWidget(make_label("Recovery 模式 USB ID：", 12, C_TEXT, bold=True))
+        rec_guide_layout.addWidget(make_label(_ft("flash.recovery.usb_ids"), 12, C_TEXT, bold=True))
         for name, uid in guide["usb_ids"]:
-            id_lbl = QLabel(f"  {name}：{uid}")
+            id_lbl = QLabel(f"  {name}: {uid}")
             id_lbl.setStyleSheet(f"color:{C_TEXT2}; font-size:{pt(11)}pt; font-family:monospace; background:transparent;")
             rec_guide_layout.addWidget(id_lbl)
         if guide.get("note"):
@@ -1063,7 +1105,7 @@ def build_page() -> QWidget:
         label.setStyleSheet(f"background:{C_CARD_LIGHT}; border-radius:8px; padding:4px;")
         label.setText("")
         label.setCursor(Qt.PointingHandCursor)
-        label.setToolTip("点击查看大图")
+        label.setToolTip(_ft("flash.image.click_view"))
         label.mousePressEvent = lambda _event, p=pix, t=title: _show_guide_image_dialog(p, t)
 
     def _show_guide_image_dialog(pix: QPixmap, title: str):
@@ -1134,8 +1176,8 @@ def build_page() -> QWidget:
         d_scroll.setWidget(image)
         root.addWidget(d_scroll, 1)
         QTimer.singleShot(0, fit_initial)
-        root.addWidget(make_label("滚轮可缩放图片，按住鼠标左键可拖动查看指定位置。", 10, C_TEXT3))
-        close_btn = make_button("关闭")
+        root.addWidget(make_label(_ft("flash.image.zoom_hint"), 10, C_TEXT3))
+        close_btn = make_button(_ft("common.close"))
         close_btn.clicked.connect(dlg.accept)
         close_row = QHBoxLayout()
         close_row.addStretch()
@@ -1143,7 +1185,9 @@ def build_page() -> QWidget:
         root.addLayout(close_row)
         dlg.exec_()
 
-    def _load_guide_image(url: str, label: QLabel, local_image: str = "", title: str = "Recovery 指南图片"):
+    def _load_guide_image(url: str, label: QLabel, local_image: str = "", title: str = ""):
+        if not title:
+            title = _ft("flash.image.dialog_title")
         local_path = _PROJECT_ROOT / local_image if local_image else None
         if local_path and local_path.exists():
             pix = QPixmap(str(local_path))
@@ -1163,11 +1207,11 @@ def build_page() -> QWidget:
                     if not p.isNull():
                         _set_guide_image_preview(label, p, title)
                     else:
-                        label.setText("图片加载失败")
+                        label.setText(_ft("flash.image.load_failed"))
                 QTimer.singleShot(0, update)
             except Exception:
                 QTimer.singleShot(0, lambda: (
-                    label.setText("图片加载失败"),
+                    label.setText(_ft("flash.image.load_failed")),
                     label.setStyleSheet(f"color:{C_TEXT3}; background:{C_CARD_LIGHT}; border-radius:8px; font-size:{pt(10)}pt;")
                 ))
         threading.Thread(target=fetch, daemon=True).start()
@@ -1185,21 +1229,21 @@ def build_page() -> QWidget:
                         pid = parts[1].split()[0].split(":")[-1].lower()
                         if pid in NVIDIA_APX_IDS:
                             found = True
-                            _flash_log_append(f"[INFO] 检测到 Recovery 设备: {line.strip()}")
+                            _flash_log_append(_ft("flash.detect.log_found", line=line.strip()))
                             break
             if found:
-                rec_status_lbl.setText("已检测到 Jetson Recovery 设备，可以开始刷写")
+                rec_status_lbl.setText(_ft("flash.detect.status_found"))
                 rec_status_lbl.setStyleSheet(f"color:{C_GREEN}; background:transparent;")
                 rec_flash_btn.setEnabled(True)
             else:
-                rec_status_lbl.setText("未检测到 Recovery 设备，请检查连接和 Recovery 模式")
+                rec_status_lbl.setText(_ft("flash.detect.status_not_found"))
                 rec_status_lbl.setStyleSheet(f"color:{C_ORANGE}; background:transparent;")
                 rec_flash_btn.setEnabled(False)
-                _flash_log_append("[WARN] lsusb 未找到 NVIDIA APX 设备")
+                _flash_log_append(_ft("flash.detect.warn_no_apx"))
         except Exception as e:
-            rec_status_lbl.setText(f"检测失败: {e}")
+            rec_status_lbl.setText(_ft("flash.detect.status_failed", error=e))
             rec_status_lbl.setStyleSheet(f"color:{C_RED}; background:transparent;")
-            _flash_log_append(f"[ERR] lsusb 执行失败: {e}")
+            _flash_log_append(_ft("flash.detect.err_lsusb", error=e))
 
     def _start_flash():
         product = flash_product_combo.currentText()
@@ -1207,7 +1251,7 @@ def build_page() -> QWidget:
         if not product or not l4t:
             return
         if not _ensure_sudo():
-            _flash_log_append("[WARN] 未获得 sudo 权限，烧录取消")
+            _flash_log_append(_ft("flash.log.sudo_flash_cancelled"))
             return
         _run_flash_thread(product, l4t, flash_only=True)
 
@@ -1216,9 +1260,9 @@ def build_page() -> QWidget:
         l4t = flash_l4t_combo.currentText()
         if not product or not l4t:
             return
-        _flash_log_append("[INFO] 用户请求重新烧录，正在重试当前设备与版本")
+        _flash_log_append(_ft("flash.log.retry_requested"))
         if not _ensure_sudo():
-            _flash_log_append("[WARN] 未获得 sudo 权限，重新烧录取消")
+            _flash_log_append(_ft("flash.log.sudo_retry_cancelled"))
             return
         _run_flash_thread(product, l4t, flash_only=True)
 
@@ -1231,14 +1275,18 @@ def build_page() -> QWidget:
         flash_next_btn.setEnabled(False)
         flash_progress.setVisible(True)
         flash_progress.setValue(0)
-        flash_progress_detail_lbl.clear()
-        flash_progress_detail_lbl.setVisible(not is_actual_flash)
-        bus.status_busy.emit("处理中")
+        bus.status_busy.emit(_ft("flash.status.processing"))
         if not flash_only:
             flash_log.clear()
-        _flash_log_append(f"[INFO] 开始：{product} / L4T {l4t}"
-                          + (" [强制重下]" if force_redownload else "")
-                          + (" [仅刷写]" if flash_only else ""))
+        _flash_log_append(
+            _ft(
+                "flash.log.start",
+                product=product,
+                l4t=l4t,
+                force_redownload=(f" {_ft('flash.log.tag_force_redownload')}" if force_redownload else ""),
+                flash_only=(f" {_ft('flash.log.tag_flash_only')}" if flash_only else ""),
+            )
+        )
         _state["flash_prepare_only"] = prepare_only
         _state["flash_download_only"] = download_only
         _state["flash_flash_only"] = flash_only
@@ -1262,7 +1310,8 @@ def build_page() -> QWidget:
         flash_prepare_scene.set_download_progress(0.0 if not is_actual_flash else 1.0)
         bus.flash_started.emit(product, l4t)
         thread = FlashThread(product, l4t, skip_verify_cb.isChecked(), download_only,
-                             force_redownload=force_redownload, prepare_only=prepare_only, flash_only=flash_only)
+                             force_redownload=force_redownload, prepare_only=prepare_only,
+                             flash_only=flash_only, lang=_state["lang"])
         thread.progress_msg.connect(_on_flash_msg)
         thread.progress_val.connect(_on_flash_progress)
         thread.progress_log.connect(_flash_log_append)
@@ -1274,17 +1323,15 @@ def build_page() -> QWidget:
     def _on_flash_msg(msg):
         _state["active_status_label"].setText(msg)
         _flash_log_append(f"[INFO] {msg}")
-        if flash_step_stack.currentIndex() == 0 and not any(k in msg for k in ("下载", "下载固件")):
-            flash_progress_detail_lbl.clear()
-            flash_progress_detail_lbl.setVisible(False)
-        if "跳过下载" in msg or "校验" in msg or "解压" in msg or "刷写" in msg:
+        msg_lower = msg.lower()
+        if any(k in msg_lower for k in ("skip download", "verify", "extract", "flash")):
             bar = _state["active_progress"]
             if bar.maximum() == 0:
                 bar.setRange(0, 100)
         if flash_step_stack.currentIndex() == 0:
-            if any(k in msg for k in ("解压", "跳过下载", "下载", "校验", "初始化")):
+            if any(k in msg_lower for k in ("extract", "skip download", "download", "verify", "initialize")):
                 flash_prepare_scene.set_mode("downloading")
-            elif "完成" in msg:
+            elif "complete" in msg_lower:
                 flash_prepare_scene.set_mode("idle")
 
     def _on_flash_progress(value):
@@ -1304,18 +1351,18 @@ def build_page() -> QWidget:
             pct = int(downloaded / total * 100)
             bar.setRange(0, 100)
             bar.setValue(pct)
-            label_text = f"下载固件中... {_fmt(downloaded)} / {_fmt(total)}  ({pct}%)"
-            detail_text = f"BSP 下载进度：已下载 {_fmt(downloaded)}，总大小 {_fmt(total)}，完成 {pct}%"
+            label_text = _ft(
+                "flash.status.downloading_with_total",
+                downloaded=_fmt(downloaded),
+                total=_fmt(total),
+                pct=pct,
+            )
             if flash_step_stack.currentIndex() == 0:
                 flash_prepare_scene.set_download_progress(pct / 100)
         else:
             bar.setRange(0, 0)
-            label_text = f"下载固件中... {_fmt(downloaded)}"
-            detail_text = f"BSP 下载进度：已下载 {_fmt(downloaded)}，正在获取总大小..."
+            label_text = _ft("flash.status.downloading", downloaded=_fmt(downloaded))
         _state["active_status_label"].setText(label_text)
-        if flash_step_stack.currentIndex() == 0:
-            flash_progress_detail_lbl.setText(detail_text)
-            flash_progress_detail_lbl.setVisible(True)
 
     def _on_flash_done(ok, msg):
         was_prepare_only = _state["flash_prepare_only"]
@@ -1327,8 +1374,6 @@ def build_page() -> QWidget:
         flash_cancel_btn.setVisible(False)
         flash_run_cancel_btn.setVisible(False)
         flash_run_retry_btn.setVisible(False)
-        flash_progress_detail_lbl.clear()
-        flash_progress_detail_lbl.setVisible(False)
         color = C_GREEN if ok else C_RED
         icon = "\u2713" if ok else "\u2717"
         _state["active_progress"].setRange(0, 100)
@@ -1336,7 +1381,7 @@ def build_page() -> QWidget:
         _state["active_status_label"].setText(f"{icon} {msg}")
         _state["active_status_label"].setStyleSheet(f"color:{color}; background:transparent;")
         _flash_log_append(f"[{'OK' if ok else 'ERR'}] {msg}")
-        bus.status_idle.emit("就绪")
+        bus.status_idle.emit(_ft("flash.status.ready"))
         _update_cache_label()
 
         if was_actual_flash:
@@ -1371,11 +1416,96 @@ def build_page() -> QWidget:
         _update_cache_label()
         bus.flash_completed.emit(ok, msg)
 
-    # ── 信号连接 ──
+    i18n = page.i18n
+    i18n.bind_text(header_title_lbl, "flash.page.title")
+    i18n.bind_text(header_sub_lbl, "flash.page.subtitle")
+    for idx, lbl in enumerate(_step_labels):
+        i18n.bind_text(lbl, step_key_order[idx])
+    i18n.bind_text(dev_title_lbl, "flash.device.title")
+    i18n.bind_text(dev_sub_lbl, "flash.device.subtitle")
+    i18n.bind_text(prod_name_lbl, "flash.device.product")
+    i18n.bind_text(l4t_name_lbl, "flash.device.l4t")
+    i18n.bind_text(flash_getting_started_btn, "flash.docs.getting_started")
+    i18n.bind_text(flash_hardware_btn, "flash.docs.hardware_interface")
+    i18n.bind_text(opt_title_lbl, "flash.options.title")
+    i18n.bind_text(skip_verify_cb, "flash.options.skip_verify")
+    i18n.bind_text(rec_guide_title_lbl, "flash.recovery.title")
+    i18n.bind_text(rec_guide_empty_lbl, "flash.recovery.select_first")
+    i18n.bind_text(guide_title_lbl, "flash.guide.title")
+    i18n.bind_text(guide_sub_lbl, "flash.guide.subtitle")
+    i18n.bind_text(hint_badge, "flash.guide.recommended")
+    i18n.bind_text(hint_title_lbl, "flash.guide.next_title")
+    i18n.bind_text(hint_desc_lbl, "flash.guide.next_desc")
+    i18n.bind_text(hint_init_btn, "flash.btn.jetson_init")
+    for step_title_lbl, title_key, step_desc_lbl, desc_key in next_step_text_labels:
+        i18n.bind_text(step_title_lbl, title_key)
+        i18n.bind_text(step_desc_lbl, desc_key)
+    i18n.bind_text(step1_title_lbl, "flash.step1.title")
+    i18n.bind_text(step1_sub_lbl, "flash.step1.subtitle")
+    i18n.bind_text(step2_title_lbl, "flash.step2.title")
+    i18n.bind_text(step2_sub_lbl, "flash.step2.subtitle")
+    i18n.bind_text(step3_title_lbl, "flash.step3.title")
+    i18n.bind_text(step4_title_lbl, "flash.step4.title")
+    i18n.bind_text(flash_cancel_btn, "flash.btn.cancel")
+    i18n.bind_text(flash_download_btn, "flash.btn.download_extract")
+    i18n.bind_tooltip(flash_download_btn, "flash.btn.download_extract_tip")
+    i18n.bind_text(flash_clear_btn, "flash.btn.clear_cache")
+    i18n.bind_tooltip(flash_clear_btn, "flash.btn.clear_cache_tip")
+    i18n.bind_text(flash_next_btn, "flash.btn.next")
+    i18n.bind_tooltip(flash_next_btn, "flash.btn.next_tip")
+    i18n.bind_text(rec_back_btn, "flash.btn.back")
+    i18n.bind_text(rec_detect_btn, "flash.btn.detect_device")
+    i18n.bind_text(rec_flash_btn, "flash.btn.start_flash")
+    i18n.bind_text(flash_run_cancel_btn, "flash.btn.cancel")
+    i18n.bind_text(flash_run_retry_btn, "flash.btn.retry_flash")
+    i18n.bind_text(flash_run_back_btn, "flash.btn.back_to_recovery")
+    i18n.bind_text(flash_done_init_btn, "flash.btn.jetson_init")
+    i18n.bind_text(flash_done_restart_btn, "flash.btn.restart")
+    i18n.bind_text(log_title_lbl, "flash.log.title")
+    i18n.bind_text(save_btn, "flash.log.save")
+    i18n.bind_text(clear_log_btn, "flash.log.clear")
+
+    def _refresh_product_summary():
+        product = flash_product_combo.currentText()
+        if not product:
+            flash_info.setText(_ft("flash.product_summary.waiting"))
+            if not flash_device_img.pixmap():
+                flash_device_img.setText(_ft("flash.product_summary.no_image"))
+            return
+        info = product_images.get(product, {})
+        name = info.get("name", product)
+        versions = len(products.get(product, []))
+        flash_info.setText(_flash_info_html(name, versions))
+        _set_flash_doc_button(
+            flash_getting_started_btn,
+            (info.get("getting_started", "") or "").strip(),
+            _ft("flash.docs.getting_started_tip"),
+        )
+        _set_flash_doc_button(
+            flash_hardware_btn,
+            (info.get("hardware_interfaces", "") or "").strip(),
+            _ft("flash.docs.hardware_tip"),
+        )
+        if not flash_device_img.pixmap():
+            flash_device_img.setText(_ft("flash.product_summary.no_image"))
+
+    i18n.bind_callable(_refresh_product_summary)
+    i18n.bind_callable(_update_cache_label)
+
+    def _retranslate_ui(lang=None):
+        global _FLASH_LANG_OVERRIDE
+        if lang:
+            _FLASH_LANG_OVERRIDE = lang
+            _state["lang"] = lang
+        i18n.apply(lang)
+    page.retranslate_ui = _retranslate_ui
+
+    # Signal wiring.
     flash_product_combo.currentTextChanged.connect(_on_flash_product_changed)
     flash_l4t_combo.currentTextChanged.connect(lambda _: _update_cache_label())
 
-    # ── 初始化 ──
+    # Initial state.
+    page.retranslate_ui(get_language())
     if flash_product_combo.currentText():
         _on_flash_product_changed(flash_product_combo.currentText())
     QTimer.singleShot(0, _update_adaptive_layout)

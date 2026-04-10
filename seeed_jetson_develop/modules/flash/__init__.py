@@ -1,2 +1,2 @@
-"""烧录模块 — 固件下载、校验、刷写"""
+"""Flash module."""
 from .page import build_page

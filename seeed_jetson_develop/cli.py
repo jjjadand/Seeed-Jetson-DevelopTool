@@ -68,7 +68,7 @@ def recovery(product):
 def list_products():
     """列出所有支持的产品"""
     data_path = Path(__file__).parent / "data" / "l4t_data.json"
-    with open(data_path, 'r') as f:
+    with open(data_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     
     products = {}
@@ -89,16 +89,8 @@ def list_products():
 def gui():
     """启动图形界面"""
     try:
-        # 直接导入 main 函数，避免通过 __init__.py
         import sys
-        from pathlib import Path
-        
-        # 确保可以找到模块
-        module_path = Path(__file__).parent
-        if str(module_path) not in sys.path:
-            sys.path.insert(0, str(module_path))
-        
-        from seeed_jetson_develop.gui.main_window import main as gui_main
+        from seeed_jetson_develop.gui.main_window_v2 import main as gui_main
         gui_main()
     except ImportError as e:
         click.echo(f"错误: 无法启动 GUI，请安装 PyQt5: pip install PyQt5", err=True)

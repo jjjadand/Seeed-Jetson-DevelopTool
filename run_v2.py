@@ -25,6 +25,9 @@ log.info("日志文件: %s", _log_file)
 
 # ── 全局未捕获异常 → 写日志 + 弹窗 ──────────────────────────────────────────
 def _excepthook(exc_type, exc_value, exc_tb):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
     msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
     log.critical("未捕获异常:\n%s", msg)
     try:

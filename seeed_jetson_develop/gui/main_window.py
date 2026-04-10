@@ -66,10 +66,10 @@ class MainWindow(QMainWindow):
     
     def load_data(self):
         """加载数据"""
-        with open(self.data_path / "l4t_data.json", 'r') as f:
+        with open(self.data_path / "l4t_data.json", 'r', encoding='utf-8') as f:
             self.l4t_data = json.load(f)
         
-        with open(self.data_path / "product_images.json", 'r') as f:
+        with open(self.data_path / "product_images.json", 'r', encoding='utf-8') as f:
             self.product_images = json.load(f)
         
         with open(self.data_path / "recovery_guides.json", 'r', encoding='utf-8') as f:
